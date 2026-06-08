@@ -41,4 +41,18 @@ public final class NgaConnectorTest {
         assertEquals("http://img.nga.178.com/attachments/mon_202606/08/inline.png", imageUrls.get(0));
         assertEquals("http://img.nga.178.com/attachments/mon_202606/08/sample.jpg", imageUrls.get(1));
     }
+
+    @Test
+    public void extractsPostTimeMetadata() throws Exception {
+        JSONObject item = new JSONObject(
+                "{"
+                        + "\"postdate\":1780912200,"
+                        + "\"lastmodify\":1780915800"
+                        + "}"
+        );
+
+        String meta = NgaConnector.postMetaFromApiPost(item);
+
+        assertEquals("发表于 2026-6-8 17:50 · 编辑 2026-6-8 18:50", meta);
+    }
 }

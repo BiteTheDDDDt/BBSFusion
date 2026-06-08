@@ -228,7 +228,7 @@ public final class ForumHtmlParsers {
                 if (!seen.add(seenKey)) {
                     continue;
                 }
-                posts.add(new Post(fallbackAuthor(posts.size()), "", text, imageUrls));
+                posts.add(new Post(fallbackAuthor(posts.size()), "", "", text, imageUrls));
                 if (posts.size() >= 40) {
                     return posts;
                 }
@@ -287,7 +287,8 @@ public final class ForumHtmlParsers {
                 author = fallbackAuthor(posts.size());
             }
             String avatarUrl = extractPostAvatar(container);
-            posts.add(new Post(author, avatarUrl, content, imageUrls));
+            String meta = extractPostMeta(container);
+            posts.add(new Post(author, avatarUrl, meta, content, imageUrls));
             if (posts.size() >= 40) {
                 return;
             }
@@ -349,6 +350,62 @@ public final class ForumHtmlParsers {
             url = absoluteUrl(image, "data-original");
         }
         return url;
+    }
+
+    private static String extractPostMeta(Element container) {
+        String posted = extractPostTime(container);
+        String edited = extractEditTime(container);
+        if (posted.isEmpty()) {
+            return edited;
+        }
+        if (edited.isEmpty() || posted.equals(edited)) {
+            return posted;
+        }
+        return posted + " · " + edited;
+    }
+
+    private static String extractPostTime(Element container) {
+        Element timeElement = firstElement(container, new String[]{
+                "time[datetime]",
+                ".authi em",
+                ".pti .authi em",
+                ".pi .authi em",
+                ".authi span[title]",
+                ".posttime",
+                ".time"
+        });
+        if (timeElement != null) {
+            String datetime = clean(timeElement.attr("datetime"));
+            if (!datetime.isEmpty()) {
+                return "发表于 " + datetime.replace('T', ' ').replaceAll("\\.\\d+Z?$", "");
+            }
+            String title = clean(timeElement.attr("title"));
+            if (!title.isEmpty()) {
+                return "发表于 " + title;
+            }
+            String text = cleanPostTimeLabel(timeElement.text());
+            if (!text.isEmpty()) {
+                return text;
+            }
+        }
+
+        String time = extractLastTimeText(clean(container.select(".authi, .pti, .pi").text()));
+        if (time.isEmpty()) {
+            return "";
+        }
+        return "发表于 " + time;
+    }
+
+    private static String extractEditTime(Element container) {
+        String text = clean(container.select(".pstatus, .editp, .post-edited").text());
+        if (text.isEmpty()) {
+            return "";
+        }
+        String time = extractLastTimeText(text);
+        if (time.isEmpty()) {
+            return text.length() > 50 ? "" : text;
+        }
+        return "编辑 " + time;
     }
 
     private static List<String> extractPostImages(Element contentElement) {
@@ -662,5 +719,21 @@ public final class ForumHtmlParsers {
         return text.replace('\u00a0', ' ')
                 .replaceAll("\\s+", " ")
                 .trim();
+    }
+
+    private static String cleanPostTimeLabel(String text) {
+        String value = clean(text);
+        if (value.isEmpty()) {
+            return "";
+        }
+        value = value.replaceFirst("^发表于\\s*", "发表于 ");
+        if (value.startsWith("发表于 ")) {
+            return value;
+        }
+        String time = extractLastTimeText(value);
+        if (!time.isEmpty()) {
+            return "发表于 " + time;
+        }
+        return value.length() > 40 ? "" : value;
     }
 }

@@ -72,7 +72,8 @@ public final class ForumHtmlParsersTest {
         Document document = Jsoup.parse(
                 "<div id=\"post_1\"><table id=\"pid1\"><tr>" +
                         "<td class=\"pls\"><div class=\"authi\"><a class=\"xw1\" href=\"space-uid-1.html\">alice</a></div></td>" +
-                        "<td><td class=\"t_f\" id=\"postmessage_1\">这是一段足够长的帖子正文内容。</td></td>" +
+                        "<td><div class=\"authi\"><em>发表于 2026-6-8 17:50</em></div>" +
+                        "<td class=\"t_f\" id=\"postmessage_1\">这是一段足够长的帖子正文内容。</td></td>" +
                         "</tr></table></div>",
                 "https://stage1st.com/2b/"
         );
@@ -81,6 +82,7 @@ public final class ForumHtmlParsersTest {
 
         assertEquals(1, detail.posts.size());
         assertEquals("alice", detail.posts.get(0).author);
+        assertEquals("发表于 2026-6-8 17:50", detail.posts.get(0).meta);
         assertEquals("这是一段足够长的帖子正文内容。", detail.posts.get(0).content);
     }
 
@@ -92,7 +94,7 @@ public final class ForumHtmlParsersTest {
                         "<div class=\"display pi pione\">" +
                         "<ul class=\"authi\"><li class=\"mtit\"><span class=\"z\">" +
                         "<a href=\"home.php?mod=space&amp;uid=464256&amp;mobile=2\">活久见</a>" +
-                        "</span></li></ul>" +
+                        "</span><em>发表于 2026-6-8 18:20</em></li></ul>" +
                         "<div class=\"message\">这是一段来自手机页的足够长的帖子正文内容。" +
                         "<img file=\"attachments/month_0608/sample.jpg\" src=\"static/image/common/none.gif\" />" +
                         "</div>" +
@@ -105,6 +107,7 @@ public final class ForumHtmlParsersTest {
         assertEquals(1, detail.posts.size());
         assertEquals("活久见", detail.posts.get(0).author);
         assertEquals("https://stage1st.com/2b/avatar.jpg", detail.posts.get(0).avatarUrl);
+        assertEquals("发表于 2026-6-8 18:20", detail.posts.get(0).meta);
         assertEquals("这是一段来自手机页的足够长的帖子正文内容。", detail.posts.get(0).content);
         assertEquals("https://stage1st.com/2b/attachments/month_0608/sample.jpg", detail.posts.get(0).imageUrls.get(0));
     }

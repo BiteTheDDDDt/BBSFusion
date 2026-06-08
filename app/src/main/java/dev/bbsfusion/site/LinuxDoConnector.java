@@ -34,6 +34,8 @@ public final class LinuxDoConnector implements ForumConnector {
     private static final Pattern TOPIC_ID = Pattern.compile("/t/(?:[^/]+/)?(\\d+)");
     private static final DateTimeFormatter TIME_FORMATTER =
             DateTimeFormatter.ofPattern("M-d HH:mm").withZone(ZoneId.of("Asia/Shanghai"));
+    private static final DateTimeFormatter POST_TIME_FORMATTER =
+            DateTimeFormatter.ofPattern("yyyy-M-d HH:mm").withZone(ZoneId.of("Asia/Shanghai"));
 
     @Override
     public String id() {
@@ -283,6 +285,7 @@ public final class LinuxDoConnector implements ForumConnector {
                             "楼层 " + (posts.size() + 1)
                     ),
                     discourseAvatar(item.optString("avatar_template", "")),
+                    postMeta(item),
                     content.text,
                     content.imageUrls
             ));
@@ -311,7 +314,7 @@ public final class LinuxDoConnector implements ForumConnector {
             if (avatarElement != null) {
                 avatar = absoluteLinuxDoUrl(avatarElement.attr("src"));
             }
-            posts.add(new Post(author, avatar, content.text, content.imageUrls));
+            posts.add(new Post(author, avatar, postMetaFromHtml(container), content.text, content.imageUrls));
             if (posts.size() >= 80) {
                 break;
             }
@@ -325,6 +328,41 @@ public final class LinuxDoConnector implements ForumConnector {
         }
         Matcher matcher = TOPIC_ID.matcher(url);
         return matcher.find() ? matcher.group(1) : "";
+    }
+
+    static String postMeta(JSONObject item) {
+        long created = parseInstantMillis(firstNonEmpty(
+                item.optString("created_at", ""),
+                item.optString("createdAt", "")
+        ));
+        long updated = parseInstantMillis(firstNonEmpty(
+                item.optString("updated_at", ""),
+                item.optString("last_version_at", ""),
+                item.optString("updatedAt", "")
+        ));
+
+        String meta = "";
+        if (created > 0L) {
+            meta = "发表于 " + POST_TIME_FORMATTER.format(Instant.ofEpochMilli(created));
+        }
+        if (updated > 0L && updated > created + 60_000L) {
+            String editText = "编辑 " + POST_TIME_FORMATTER.format(Instant.ofEpochMilli(updated));
+            meta = meta.isEmpty() ? editText : meta + " · " + editText;
+        }
+        return meta;
+    }
+
+    private static String postMetaFromHtml(Element container) {
+        Element time = container.selectFirst("time[datetime]");
+        if (time == null) {
+            return "";
+        }
+        long millis = parseInstantMillis(time.attr("datetime"));
+        if (millis <= 0L) {
+            String text = clean(time.text());
+            return text.isEmpty() ? "" : "发表于 " + text;
+        }
+        return "发表于 " + POST_TIME_FORMATTER.format(Instant.ofEpochMilli(millis));
     }
 
     private static String jsonUrlForBoard(BoardDefinition board) {

@@ -4,6 +4,7 @@ import dev.bbsfusion.core.BoardDefinition;
 import dev.bbsfusion.core.TopicSummary;
 
 import org.json.JSONArray;
+import org.json.JSONObject;
 import org.junit.Test;
 
 import java.util.List;
@@ -57,5 +58,15 @@ public final class V2exConnectorTest {
     @Test
     public void extractsTopicIdFromTopicUrl() {
         assertEquals("456", V2exConnector.topicIdFromUrl("https://www.v2ex.com/t/456#reply1"));
+    }
+
+    @Test
+    public void extractsPostTimeMetadata() throws Exception {
+        JSONObject item = new JSONObject("{\"created\":1780912200,\"last_modified\":1780915800}");
+
+        assertEquals(
+                "发表于 2026-6-8 17:50 · 编辑 2026-6-8 18:50",
+                V2exConnector.postMeta(item)
+        );
     }
 }

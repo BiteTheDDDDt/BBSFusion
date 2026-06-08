@@ -47,6 +47,8 @@ public final class NgaConnector implements ForumConnector {
     );
     private static final DateTimeFormatter TIME_FORMATTER =
             DateTimeFormatter.ofPattern("M-d HH:mm").withZone(ZoneId.of("Asia/Shanghai"));
+    private static final DateTimeFormatter POST_TIME_FORMATTER =
+            DateTimeFormatter.ofPattern("yyyy-M-d HH:mm").withZone(ZoneId.of("Asia/Shanghai"));
 
     @Override
     public String id() {
@@ -202,7 +204,8 @@ public final class NgaConnector implements ForumConnector {
             }
             String author = authorFromPostJson(item, json, posts.size());
             String avatarUrl = avatarFromPostJson(item, json);
-            posts.add(new Post(author, avatarUrl, content, imageUrls));
+            String meta = postMetaFromApiPost(item);
+            posts.add(new Post(author, avatarUrl, meta, content, imageUrls));
         }
 
         String title = json.optString("subject", "").trim();
@@ -514,6 +517,40 @@ public final class NgaConnector implements ForumConnector {
         return urls;
     }
 
+    static String postMetaFromApiPost(JSONObject item) {
+        long posted = firstPositive(
+                item.optLong("postdate", 0L),
+                item.optLong("post_date", 0L),
+                item.optLong("created", 0L),
+                item.optLong("created_at", 0L)
+        );
+        long edited = firstPositive(
+                item.optLong("lastmodify", 0L),
+                item.optLong("last_modified", 0L),
+                item.optLong("modifytime", 0L),
+                item.optLong("edittime", 0L)
+        );
+
+        String meta = "";
+        if (posted > 0L) {
+            meta = "发表于 " + POST_TIME_FORMATTER.format(Instant.ofEpochSecond(posted));
+        }
+        if (edited > 0L && edited != posted) {
+            String editText = "编辑 " + POST_TIME_FORMATTER.format(Instant.ofEpochSecond(edited));
+            meta = meta.isEmpty() ? editText : meta + " · " + editText;
+        }
+
+        String alterInfo = cleanApiContent(firstNonEmpty(
+                stringValue(item, "alterinfo"),
+                stringValue(item, "alter_info"),
+                stringValue(item, "lastmodifyinfo")
+        ));
+        if (!alterInfo.isEmpty() && !meta.contains("编辑")) {
+            meta = meta.isEmpty() ? alterInfo : meta + " · " + alterInfo;
+        }
+        return meta;
+    }
+
     private static void collectImageUrlsFromText(String text, List<String> urls, Set<String> seen) {
         if (text == null || text.isEmpty()) {
             return;
@@ -639,6 +676,15 @@ public final class NgaConnector implements ForumConnector {
                 .replaceAll("\\r?\\n\\s*", "\n")
                 .replaceAll("[ \\t]+", " ")
                 .trim();
+    }
+
+    private static long firstPositive(long... values) {
+        for (long value : values) {
+            if (value > 0L) {
+                return value;
+            }
+        }
+        return 0L;
     }
 
     private static String firstNonEmpty(String... values) {

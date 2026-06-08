@@ -77,6 +77,8 @@ public final class LinuxDoConnectorTest {
                         + "\"post_stream\":{\"posts\":[{"
                         + "\"display_username\":\"alice\","
                         + "\"avatar_template\":\"/user_avatar/linux.do/alice/{size}/1_2.png\","
+                        + "\"created_at\":\"2026-06-08T07:10:00.000Z\","
+                        + "\"updated_at\":\"2026-06-08T08:10:00.000Z\","
                         + "\"cooked\":\"<p>正文</p><p><img src=\\\"/uploads/default/original/1/sample.png\\\"></p>\""
                         + "}]}"
                         + "}"
@@ -88,6 +90,7 @@ public final class LinuxDoConnectorTest {
         assertEquals("帖子标题", detail.title);
         assertEquals("alice", post.author);
         assertEquals("https://linux.do/user_avatar/linux.do/alice/96/1_2.png", post.avatarUrl);
+        assertEquals("发表于 2026-6-8 15:10 · 编辑 2026-6-8 16:10", post.meta);
         assertEquals("正文", post.content);
         assertEquals("https://linux.do/uploads/default/original/1/sample.png", post.imageUrls.get(0));
     }

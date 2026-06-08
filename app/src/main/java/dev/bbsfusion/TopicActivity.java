@@ -170,6 +170,15 @@ public final class TopicActivity extends Activity {
         authorView.setPadding(0, 0, 0, dp(2));
         textColumn.addView(authorView);
 
+        if (!post.meta.isEmpty()) {
+            TextView metaView = new TextView(this);
+            metaView.setText(post.meta);
+            metaView.setTextColor(Color.rgb(117, 117, 117));
+            metaView.setTextSize(12);
+            metaView.setPadding(0, 0, 0, dp(6));
+            textColumn.addView(metaView);
+        }
+
         TextView contentView = new TextView(this);
         contentView.setText(post.content);
         contentView.setTextColor(Color.rgb(32, 33, 36));

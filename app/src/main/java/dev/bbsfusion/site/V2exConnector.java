@@ -34,6 +34,8 @@ public final class V2exConnector implements ForumConnector {
     private static final Pattern TOPIC_ID = Pattern.compile("(?:/t/|[?&]id=)(\\d+)");
     private static final DateTimeFormatter TIME_FORMATTER =
             DateTimeFormatter.ofPattern("M-d HH:mm").withZone(ZoneId.of("Asia/Shanghai"));
+    private static final DateTimeFormatter POST_TIME_FORMATTER =
+            DateTimeFormatter.ofPattern("yyyy-M-d HH:mm").withZone(ZoneId.of("Asia/Shanghai"));
 
     @Override
     public String id() {
@@ -128,6 +130,7 @@ public final class V2exConnector implements ForumConnector {
                 posts.add(new Post(
                         memberName(member, "楼主"),
                         memberAvatar(member),
+                        postMeta(topic),
                         content.text,
                         content.imageUrls
                 ));
@@ -150,6 +153,7 @@ public final class V2exConnector implements ForumConnector {
             posts.add(new Post(
                     memberName(member, "楼层 " + (posts.size() + 1)),
                     memberAvatar(member),
+                    postMeta(reply),
                     content.text,
                     content.imageUrls
             ));
@@ -248,6 +252,20 @@ public final class V2exConnector implements ForumConnector {
                 member.optString("avatar_normal", ""),
                 member.optString("avatar_mini", "")
         ));
+    }
+
+    static String postMeta(JSONObject item) {
+        long created = item.optLong("created", 0L);
+        long modified = item.optLong("last_modified", 0L);
+        String meta = "";
+        if (created > 0L) {
+            meta = "发表于 " + POST_TIME_FORMATTER.format(Instant.ofEpochSecond(created));
+        }
+        if (modified > 0L && modified > created + 60L) {
+            String editText = "编辑 " + POST_TIME_FORMATTER.format(Instant.ofEpochSecond(modified));
+            meta = meta.isEmpty() ? editText : meta + " · " + editText;
+        }
+        return meta;
     }
 
     private static String normalizeUrl(String url) {

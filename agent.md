@@ -4,7 +4,7 @@ This file records project direction and working rules for future agents.
 
 ## Product Direction
 
-BBSFusion is a local-only Android forum reader for S1 and NGA.
+BBSFusion is a local-only Android forum reader for S1, NGA, V2EX, and Linux.do.
 
 - Android client only.
 - No cloud backend.
@@ -14,7 +14,8 @@ BBSFusion is a local-only Android forum reader for S1 and NGA.
 - Main reading flows may use single-site mode or local subscription groups.
 - Subscription groups are local-only sets of board definitions; refreshing a group fetches its boards only after the user taps the group/refresh control.
 - Do not bypass captcha, login challenges, anti-abuse checks, Cloudflare-like checks, device checks, or signed request mechanisms.
-- Do not imply official endorsement by S1 or NGA.
+- Do not imply official endorsement by S1, NGA, V2EX, Linux.do, or any other forum operator.
+- Respect source-site rules. Linux.do is read-only in this app; do not add AI-generated posting, reply drafting, or auto-posting features.
 
 ## Architecture
 
@@ -29,6 +30,8 @@ Current MVP stack:
 - `SubscriptionActivity` is the local board/group configuration surface.
 - S1 topic lists prefer desktop forum pages because they expose last-reply timestamps.
 - NGA topic lists prefer the official app API endpoint `app_api.php?__lib=subject&__act=list`; it should use only local cookies from `CookieManager` and must not log response bodies.
+- V2EX topic lists use the older public JSON endpoints for anonymous reading. API 2.0 is PAT-based and should not be enabled without a local-only token design.
+- Linux.do uses Discourse JSON endpoints first and crawler HTML as fallback. Do not bypass Cloudflare-like checks or other anti-abuse controls; WebView remains the fallback when native fetches are blocked.
 
 The connector boundary should stay small:
 

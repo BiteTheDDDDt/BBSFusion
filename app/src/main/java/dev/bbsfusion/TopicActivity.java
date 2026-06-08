@@ -229,6 +229,12 @@ public final class TopicActivity extends Activity {
         if (isS1Connector()) {
             return R.drawable.ic_default_avatar_s1;
         }
+        if (isV2exConnector()) {
+            return R.drawable.ic_default_avatar_v2ex;
+        }
+        if (isLinuxDoConnector()) {
+            return R.drawable.ic_default_avatar_linuxdo;
+        }
         return R.drawable.ic_default_avatar_nga;
     }
 
@@ -374,6 +380,14 @@ public final class TopicActivity extends Activity {
 
     private boolean isS1Connector() {
         return connector != null && "s1".equals(connector.id());
+    }
+
+    private boolean isV2exConnector() {
+        return connector != null && "v2ex".equals(connector.id());
+    }
+
+    private boolean isLinuxDoConnector() {
+        return connector != null && "linuxdo".equals(connector.id());
     }
 
     private Button makeButton(String label) {

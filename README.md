@@ -1,6 +1,6 @@
 # BBSFusion
 
-BBSFusion is a local-only Android forum reader MVP for S1 and NGA.
+BBSFusion is a local-only Android forum reader MVP for S1, NGA, V2EX, and Linux.do.
 
 ## Scope
 
@@ -13,15 +13,20 @@ BBSFusion is a local-only Android forum reader MVP for S1 and NGA.
 - Native topic-list and topic-reading views.
 - Login and original-site actions through WebView.
 
-This project is not affiliated with, endorsed by, or sponsored by S1, NGA, or their operators.
+This project is not affiliated with, endorsed by, or sponsored by S1, NGA, V2EX, Linux.do, or their operators.
 
 ## Current Features
 
-- S1 and NGA topic list aggregation.
+- S1, NGA, V2EX, and Linux.do topic list aggregation.
 - Local subscription groups.
 - Original-site login through WebView cookies.
 - Native topic detail view with usernames, avatars, and inline images.
 - Local-only preferences through Android storage.
+
+Notes:
+
+- V2EX uses the older public JSON endpoints for anonymous reading. API 2.0 requires a Personal Access Token and is not used by default.
+- Linux.do is Discourse-based. The connector uses Discourse JSON endpoints when available and falls back to crawler HTML. If the site returns a network or anti-abuse challenge, use "原站登录" or read through the original WebView.
 
 ## Requirements
 

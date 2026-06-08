@@ -8,6 +8,8 @@ import java.util.Map;
 public final class BoardCatalog {
     private static final String S1_REFERRER = "https://stage1st.com/2b/";
     private static final String NGA_REFERRER = "https://bbs.nga.cn/";
+    private static final String V2EX_REFERRER = "https://www.v2ex.com/";
+    private static final String LINUXDO_REFERRER = "https://linux.do/";
 
     private static final List<BoardDefinition> BUILT_IN_BOARDS = new ArrayList<>();
     private static final List<BoardDefinition> DEFAULT_GROUP_BOARDS = new ArrayList<>();
@@ -55,6 +57,24 @@ public final class BoardCatalog {
         BUILT_IN_BOARDS.add(nga("441", "战舰世界"));
         BUILT_IN_BOARDS.add(nga("443", "EAFC 系列"));
         BUILT_IN_BOARDS.add(nga("707", "冒险岛"));
+
+        BUILT_IN_BOARDS.add(v2ex("latest", "最新", "https://www.v2ex.com/recent"));
+        BUILT_IN_BOARDS.add(v2ex("programmer", "程序员"));
+        BUILT_IN_BOARDS.add(v2ex("python", "Python"));
+        BUILT_IN_BOARDS.add(v2ex("go", "Go"));
+        BUILT_IN_BOARDS.add(v2ex("android", "Android"));
+        BUILT_IN_BOARDS.add(v2ex("create", "分享创造"));
+        BUILT_IN_BOARDS.add(v2ex("qna", "问与答"));
+        BUILT_IN_BOARDS.add(v2ex("jobs", "酷工作"));
+        BUILT_IN_BOARDS.add(v2ex("apple", "Apple"));
+
+        BUILT_IN_BOARDS.add(linuxdo("latest", "最新", "https://linux.do/latest"));
+        BUILT_IN_BOARDS.add(linuxdoCategory("develop", "4", "开发调优"));
+        BUILT_IN_BOARDS.add(linuxdoCategory("resource", "14", "资源荟萃"));
+        BUILT_IN_BOARDS.add(linuxdoCategory("news", "34", "前沿快讯"));
+        BUILT_IN_BOARDS.add(linuxdoCategory("welfare", "36", "福利羊毛"));
+        BUILT_IN_BOARDS.add(linuxdoCategory("gossip", "11", "搞七捻三"));
+        BUILT_IN_BOARDS.add(linuxdoCategory("job", "27", "非我莫属"));
     }
 
     private BoardCatalog() {
@@ -131,6 +151,26 @@ public final class BoardCatalog {
                 "https://bbs.nga.cn/thread.php?fid=" + boardId,
                 NGA_REFERRER,
                 "NGA " + title
+        );
+    }
+
+    private static BoardDefinition v2ex(String boardId, String title) {
+        return v2ex(boardId, title, "https://www.v2ex.com/go/" + boardId);
+    }
+
+    private static BoardDefinition v2ex(String boardId, String title, String url) {
+        return new BoardDefinition("v2ex", boardId, title, url, V2EX_REFERRER, "V2EX " + title);
+    }
+
+    private static BoardDefinition linuxdo(String boardId, String title, String url) {
+        return new BoardDefinition("linuxdo", boardId, title, url, LINUXDO_REFERRER, "Linux.do " + title);
+    }
+
+    private static BoardDefinition linuxdoCategory(String slug, String categoryId, String title) {
+        return linuxdo(
+                "c:" + slug + ":" + categoryId,
+                title,
+                "https://linux.do/c/" + slug + "/" + categoryId
         );
     }
 }

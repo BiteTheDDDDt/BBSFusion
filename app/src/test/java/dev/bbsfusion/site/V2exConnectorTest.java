@@ -1,0 +1,61 @@
+package dev.bbsfusion.site;
+
+import dev.bbsfusion.core.BoardDefinition;
+import dev.bbsfusion.core.TopicSummary;
+
+import org.json.JSONArray;
+import org.junit.Test;
+
+import java.util.List;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+
+public final class V2exConnectorTest {
+    @Test
+    public void extractsTopicsFromPublicApi() throws Exception {
+        JSONArray array = new JSONArray(
+                "[{"
+                        + "\"id\":123,"
+                        + "\"title\":\"一个 V2EX 测试主题\","
+                        + "\"url\":\"https://www.v2ex.com/t/123\","
+                        + "\"last_touched\":1780915200,"
+                        + "\"replies\":8,"
+                        + "\"node\":{\"title\":\"程序员\"}"
+                        + "}]"
+        );
+        BoardDefinition board = new BoardDefinition(
+                "v2ex",
+                "latest",
+                "最新",
+                "https://www.v2ex.com/recent",
+                "https://www.v2ex.com/",
+                "V2EX 最新"
+        );
+
+        List<TopicSummary> topics = V2exConnector.parseTopics(array, board);
+
+        assertEquals(1, topics.size());
+        assertEquals("一个 V2EX 测试主题", topics.get(0).title);
+        assertEquals("https://www.v2ex.com/t/123", topics.get(0).url);
+        assertTrue(topics.get(0).meta.contains("V2EX 程序员"));
+        assertEquals(1780915200L * 1000L, topics.get(0).sortTimeMillis);
+    }
+
+    @Test
+    public void extractsRenderedTextAndImages() {
+        V2exConnector.ParsedContent content = V2exConnector.parsedContent(
+                "第一行<br><img src=\"//cdn.v2ex.com/a.png\">第二行",
+                ""
+        );
+
+        assertEquals("第一行 第二行", content.text);
+        assertEquals(1, content.imageUrls.size());
+        assertEquals("https://cdn.v2ex.com/a.png", content.imageUrls.get(0));
+    }
+
+    @Test
+    public void extractsTopicIdFromTopicUrl() {
+        assertEquals("456", V2exConnector.topicIdFromUrl("https://www.v2ex.com/t/456#reply1"));
+    }
+}

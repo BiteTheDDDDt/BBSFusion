@@ -5,6 +5,7 @@ import android.webkit.CookieManager;
 import org.jsoup.Connection;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -32,6 +33,24 @@ final class NetworkClient {
 
     static Document getDesktop(String url, String referrer) throws IOException {
         return get(url, referrer, true);
+    }
+
+    static JSONObject getJsonObject(String url, String referrer) throws IOException {
+        String body = getBody(url, referrer, true, "application/json,text/plain,*/*");
+        try {
+            return new JSONObject(body);
+        } catch (JSONException error) {
+            throw new IOException("JSON 返回无法解析。", error);
+        }
+    }
+
+    static JSONArray getJsonArray(String url, String referrer) throws IOException {
+        String body = getBody(url, referrer, true, "application/json,text/plain,*/*");
+        try {
+            return new JSONArray(body);
+        } catch (JSONException error) {
+            throw new IOException("JSON 返回无法解析。", error);
+        }
     }
 
     static JSONObject postNgaApi(String actionUrl, Map<String, String> formData) throws IOException {
@@ -74,25 +93,60 @@ final class NetworkClient {
     }
 
     private static Document get(String url, String referrer, boolean desktop) throws IOException {
+        Connection connection = baseConnection(url, referrer, desktop)
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+
+        Connection.Response response = execute(connection, url, referrer);
+
+        Document document = response.parse();
+        throwIfAccessBlocked(document);
+        return document;
+    }
+
+    private static String getBody(
+            String url,
+            String referrer,
+            boolean desktop,
+            String accept
+    ) throws IOException {
+        Connection connection = baseConnection(url, referrer, desktop)
+                .header("Accept", accept);
+        Connection.Response response = execute(connection, url, referrer);
+        return response.body();
+    }
+
+    private static Connection baseConnection(String url, String referrer, boolean desktop) {
         Connection connection = Jsoup.connect(url)
                 .userAgent(desktop ? DESKTOP_USER_AGENT : USER_AGENT)
-                .referrer(referrer)
                 .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.6")
                 .timeout(TIMEOUT_MILLIS)
                 .maxBodySize(MAX_BODY_SIZE)
                 .followRedirects(true)
                 .ignoreContentType(true)
                 .ignoreHttpErrors(true);
+        if (referrer != null && !referrer.trim().isEmpty()) {
+            connection.referrer(referrer);
+        }
+        return connection;
+    }
 
+    private static Connection.Response execute(
+            Connection connection,
+            String url,
+            String referrer
+    ) throws IOException {
         CookieManager cookieManager = CookieManager.getInstance();
         appendCookieHeader(connection, cookieManager, url);
+        if (referrer != null && !referrer.trim().isEmpty()) {
+            appendCookieHeader(connection, cookieManager, referrer);
+        }
 
         Connection.Response response = connection.execute();
         saveCookies(cookieManager, response);
-
-        Document document = response.parse();
-        throwIfAccessBlocked(document);
-        return document;
+        if (response.statusCode() >= 400) {
+            throw new IOException("站点返回 HTTP " + response.statusCode() + "。可尝试原站登录或换网络环境。");
+        }
+        return response;
     }
 
     private static void appendCookieHeader(

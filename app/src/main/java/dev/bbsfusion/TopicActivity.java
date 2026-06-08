@@ -148,7 +148,7 @@ public final class TopicActivity extends Activity {
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setPadding(dp(16), dp(14), dp(16), dp(12));
 
-        FrameLayout avatarFrame = makeAvatarFrame(post.author);
+        FrameLayout avatarFrame = makeAvatarFrame(post.avatarUrl);
         row.addView(avatarFrame, new LinearLayout.LayoutParams(dp(42), dp(42)));
         if (isHttpUrl(post.avatarUrl) && !isDefaultAvatarUrl(post.avatarUrl)) {
             ImageView avatarView = makeRemoteImageView();
@@ -206,10 +206,10 @@ public final class TopicActivity extends Activity {
         ));
     }
 
-    private FrameLayout makeAvatarFrame(String author) {
+    private FrameLayout makeAvatarFrame(String avatarUrl) {
         FrameLayout frame = new FrameLayout(this);
         ImageView placeholder = new ImageView(this);
-        placeholder.setImageResource(R.drawable.ic_default_avatar);
+        placeholder.setImageResource(defaultAvatarResource(avatarUrl));
         placeholder.setBackgroundColor(Color.rgb(224, 224, 218));
         placeholder.setScaleType(ImageView.ScaleType.CENTER_CROP);
         frame.addView(placeholder, new FrameLayout.LayoutParams(
@@ -217,6 +217,19 @@ public final class TopicActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT
         ));
         return frame;
+    }
+
+    private int defaultAvatarResource(String avatarUrl) {
+        if (isS1DefaultAvatarUrl(avatarUrl)) {
+            return R.drawable.ic_default_avatar_s1;
+        }
+        if (isNgaDefaultAvatarUrl(avatarUrl)) {
+            return R.drawable.ic_default_avatar_nga;
+        }
+        if (isS1Connector()) {
+            return R.drawable.ic_default_avatar_s1;
+        }
+        return R.drawable.ic_default_avatar_nga;
     }
 
     private ImageView makeRemoteImageView() {
@@ -335,15 +348,32 @@ public final class TopicActivity extends Activity {
     }
 
     private boolean isDefaultAvatarUrl(String value) {
-        if (value == null) {
-            return true;
+        return isBlankAvatarUrl(value) || isS1DefaultAvatarUrl(value) || isNgaDefaultAvatarUrl(value);
+    }
+
+    private boolean isS1DefaultAvatarUrl(String value) {
+        if (isBlankAvatarUrl(value)) {
+            return false;
         }
         String normalized = value.trim().toLowerCase();
-        return normalized.isEmpty()
-                || normalized.startsWith("data:image/svg+xml")
-                || normalized.equals("https://avatar.stage1st.com/noavatar.svg")
+        return normalized.equals("https://avatar.stage1st.com/noavatar.svg")
                 || normalized.equals("http://avatar.stage1st.com/noavatar.svg")
                 || normalized.endsWith("/noavatar.svg");
+    }
+
+    private boolean isNgaDefaultAvatarUrl(String value) {
+        if (isBlankAvatarUrl(value)) {
+            return false;
+        }
+        return value.trim().toLowerCase().startsWith("data:image/svg+xml");
+    }
+
+    private boolean isBlankAvatarUrl(String value) {
+        return value == null || value.trim().isEmpty();
+    }
+
+    private boolean isS1Connector() {
+        return connector != null && "s1".equals(connector.id());
     }
 
     private Button makeButton(String label) {

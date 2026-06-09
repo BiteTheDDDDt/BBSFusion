@@ -113,6 +113,18 @@ public final class BoardCatalog {
         return boards;
     }
 
+    public static List<BoardDefinition> defaultV2exGroupBoards() {
+        List<BoardDefinition> boards = new ArrayList<>();
+        addBoardById(boards, "v2ex", "latest");
+        return boards;
+    }
+
+    public static List<BoardDefinition> defaultLinuxDoGroupBoards() {
+        List<BoardDefinition> boards = new ArrayList<>();
+        addBoardById(boards, "linuxdo", "latest");
+        return boards;
+    }
+
     public static List<BoardDefinition> merge(List<BoardDefinition> first, List<BoardDefinition> second) {
         Map<String, BoardDefinition> boards = new LinkedHashMap<>();
         for (BoardDefinition board : first) {

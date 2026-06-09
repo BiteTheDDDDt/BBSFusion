@@ -25,6 +25,7 @@ import dev.bbsfusion.core.SubscriptionGroup;
 import dev.bbsfusion.core.SubscriptionStore;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -123,13 +124,26 @@ public final class SubscriptionActivity extends Activity {
         newGroup.setOnClickListener(v -> createGroup());
         Button deleteGroup = makeButton("删除组");
         deleteGroup.setOnClickListener(v -> deleteGroup());
-        Button setCurrent = makeButton("设为默认");
+        Button setCurrent = makeButton("默认打开");
         setCurrent.setOnClickListener(v -> saveCurrentGroup(true, true));
 
         groupActions.addView(newGroup, new LinearLayout.LayoutParams(0, dp(44), 1));
         groupActions.addView(deleteGroup, new LinearLayout.LayoutParams(0, dp(44), 1));
         groupActions.addView(setCurrent, new LinearLayout.LayoutParams(0, dp(44), 1));
         root.addView(groupActions);
+
+        LinearLayout orderActions = new LinearLayout(this);
+        orderActions.setOrientation(LinearLayout.HORIZONTAL);
+        orderActions.setPadding(dp(12), 0, dp(12), dp(6));
+
+        Button moveLeft = makeButton("左移");
+        moveLeft.setOnClickListener(v -> moveSelectedGroup(-1));
+        Button moveRight = makeButton("右移");
+        moveRight.setOnClickListener(v -> moveSelectedGroup(1));
+
+        orderActions.addView(moveLeft, new LinearLayout.LayoutParams(0, dp(44), 1));
+        orderActions.addView(moveRight, new LinearLayout.LayoutParams(0, dp(44), 1));
+        root.addView(orderActions);
 
         LinearLayout boardActions = new LinearLayout(this);
         boardActions.setOrientation(LinearLayout.HORIZONTAL);
@@ -199,8 +213,8 @@ public final class SubscriptionActivity extends Activity {
         mergeVisibleBoards(group.boards);
         renderBoardChecks();
         String currentLabel = group.id.equals(SubscriptionStore.selectedGroupId(this))
-                ? "已设为默认"
-                : "尚未设为默认";
+                ? "启动默认"
+                : "非启动默认";
         status.setText(group.name + " 包含 " + group.boards.size()
                 + " 个板块；可选 " + visibleBoards.size() + " 个。" + currentLabel + "，勾选后保存。");
     }
@@ -262,6 +276,30 @@ public final class SubscriptionActivity extends Activity {
         status.setText("订阅组已删除。");
     }
 
+    private void moveSelectedGroup(int direction) {
+        if (groups.size() <= 1) {
+            status.setText("只有一个订阅组，不能调整顺序。");
+            return;
+        }
+        saveCurrentGroup(false, false);
+        int targetIndex = selectedGroupIndex + direction;
+        if (targetIndex < 0) {
+            status.setText("已经在最左侧。");
+            return;
+        }
+        if (targetIndex >= groups.size()) {
+            status.setText("已经在最右侧。");
+            return;
+        }
+        Collections.swap(groups, selectedGroupIndex, targetIndex);
+        selectedGroupIndex = targetIndex;
+        SubscriptionStore.saveGroups(this, groups);
+        renderGroupSpinner();
+        renderGroupEditor();
+        status.setText(selectedGroup().name + " 已移动到第 " + (selectedGroupIndex + 1)
+                + " 位，主页顶部会按这个顺序显示。");
+    }
+
     private void saveCurrentGroup(boolean makeCurrent, boolean refreshSpinner) {
         if (groups.isEmpty() || selectedGroupIndex < 0 || selectedGroupIndex >= groups.size()) {
             return;
@@ -284,7 +322,7 @@ public final class SubscriptionActivity extends Activity {
             renderGroupSpinner();
         }
         if (makeCurrent) {
-            status.setText(updated.name + " 已设为默认并保存：" + selectedBoards.size() + " 个板块。");
+            status.setText(updated.name + " 已设为默认打开并保存：" + selectedBoards.size() + " 个板块。");
         } else {
             status.setText(updated.name + " 已保存：" + selectedBoards.size() + " 个板块。");
         }

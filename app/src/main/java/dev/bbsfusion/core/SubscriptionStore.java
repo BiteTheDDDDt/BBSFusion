@@ -7,15 +7,20 @@ import org.json.JSONArray;
 import org.json.JSONException;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
 
 public final class SubscriptionStore {
     private static final String PREFS_NAME = "bbsfusion_subscriptions";
     private static final String KEY_GROUPS = "groups_v1";
     private static final String KEY_SELECTED_GROUP = "selected_group_id";
-    private static final String DEFAULT_GROUP_ID = "default";
+    private static final String LEGACY_AGGREGATE_GROUP_ID = "default";
     private static final String S1_GROUP_ID = "builtin_s1";
     private static final String NGA_GROUP_ID = "builtin_nga";
+    private static final String V2EX_GROUP_ID = "builtin_v2ex";
+    private static final String LINUXDO_GROUP_ID = "builtin_linuxdo";
 
     private SubscriptionStore() {
     }
@@ -26,6 +31,7 @@ public final class SubscriptionStore {
         if (raw == null || raw.trim().isEmpty()) {
             List<SubscriptionGroup> defaults = defaultGroups();
             saveGroups(context, defaults);
+            ensureSelectedGroupExists(context, defaults);
             return defaults;
         }
 
@@ -39,10 +45,12 @@ public final class SubscriptionStore {
             if (normalized != groups) {
                 saveGroups(context, normalized);
             }
+            ensureSelectedGroupExists(context, normalized);
             return normalized;
         } catch (JSONException ignored) {
             List<SubscriptionGroup> defaults = defaultGroups();
             saveGroups(context, defaults);
+            ensureSelectedGroupExists(context, defaults);
             return defaults;
         }
     }
@@ -71,7 +79,7 @@ public final class SubscriptionStore {
     }
 
     public static String selectedGroupId(Context context) {
-        return prefs(context).getString(KEY_SELECTED_GROUP, DEFAULT_GROUP_ID);
+        return prefs(context).getString(KEY_SELECTED_GROUP, S1_GROUP_ID);
     }
 
     public static void setSelectedGroupId(Context context, String groupId) {
@@ -79,7 +87,7 @@ public final class SubscriptionStore {
     }
 
     public static SubscriptionGroup defaultGroup() {
-        return new SubscriptionGroup(DEFAULT_GROUP_ID, "综合", BoardCatalog.defaultGroupBoards());
+        return new SubscriptionGroup(S1_GROUP_ID, "S1", BoardCatalog.defaultS1GroupBoards());
     }
 
     public static List<SubscriptionGroup> displayGroups(Context context) {
@@ -90,15 +98,16 @@ public final class SubscriptionStore {
         return new ArrayList<>(groups);
     }
 
-    private static List<SubscriptionGroup> defaultGroups() {
+    static List<SubscriptionGroup> defaultGroups() {
         List<SubscriptionGroup> groups = new ArrayList<>();
         groups.add(defaultGroup());
-        groups.add(new SubscriptionGroup(S1_GROUP_ID, "S1", BoardCatalog.defaultS1GroupBoards()));
         groups.add(new SubscriptionGroup(NGA_GROUP_ID, "NGA", BoardCatalog.defaultNgaGroupBoards()));
+        groups.add(new SubscriptionGroup(V2EX_GROUP_ID, "V2EX", BoardCatalog.defaultV2exGroupBoards()));
+        groups.add(new SubscriptionGroup(LINUXDO_GROUP_ID, "Linux.do", BoardCatalog.defaultLinuxDoGroupBoards()));
         return groups;
     }
 
-    private static List<SubscriptionGroup> normalizeGroups(List<SubscriptionGroup> source) {
+    static List<SubscriptionGroup> normalizeGroups(List<SubscriptionGroup> source) {
         if (source.isEmpty()) {
             return defaultGroups();
         }
@@ -106,39 +115,152 @@ public final class SubscriptionStore {
         List<SubscriptionGroup> groups = new ArrayList<>(source);
         boolean changed = false;
 
-        int defaultIndex = indexOfGroup(groups, DEFAULT_GROUP_ID);
-        if (defaultIndex < 0) {
-            groups.add(0, defaultGroup());
-            defaultIndex = 0;
-            changed = true;
-        } else {
-            SubscriptionGroup current = groups.get(defaultIndex);
-            if ("默认订阅".equals(current.name)) {
-                groups.set(defaultIndex, new SubscriptionGroup(current.id, "综合", current.boards));
-                changed = true;
-            }
-        }
-
-        if (indexOfGroup(groups, S1_GROUP_ID) < 0) {
-            groups.add(defaultIndex + 1, new SubscriptionGroup(
-                    S1_GROUP_ID,
-                    "S1",
-                    BoardCatalog.defaultS1GroupBoards()
-            ));
+        if (removeUnchangedLegacyAggregate(groups)) {
             changed = true;
         }
 
-        if (indexOfGroup(groups, NGA_GROUP_ID) < 0) {
-            int s1Index = indexOfGroup(groups, S1_GROUP_ID);
-            groups.add(s1Index + 1, new SubscriptionGroup(
-                    NGA_GROUP_ID,
-                    "NGA",
-                    BoardCatalog.defaultNgaGroupBoards()
-            ));
+        if (groups.isEmpty()) {
+            return defaultGroups();
+        }
+
+        if (ensureForumDefaultGroup(groups, S1_GROUP_ID, "S1", BoardCatalog.defaultS1GroupBoards())) {
+            changed = true;
+        }
+        if (ensureForumDefaultGroup(groups, NGA_GROUP_ID, "NGA", BoardCatalog.defaultNgaGroupBoards())) {
+            changed = true;
+        }
+        if (ensureForumDefaultGroup(groups, V2EX_GROUP_ID, "V2EX", BoardCatalog.defaultV2exGroupBoards())) {
+            changed = true;
+        }
+        if (ensureForumDefaultGroup(groups, LINUXDO_GROUP_ID, "Linux.do", BoardCatalog.defaultLinuxDoGroupBoards())) {
             changed = true;
         }
 
         return changed ? groups : source;
+    }
+
+    private static boolean ensureForumDefaultGroup(
+            List<SubscriptionGroup> groups,
+            String id,
+            String name,
+            List<BoardDefinition> boards
+    ) {
+        int keeperIndex = indexOfDefaultLikeGroup(groups, id, name, boards);
+        if (keeperIndex < 0) {
+            groups.add(new SubscriptionGroup(id, name, boards));
+            return true;
+        }
+
+        boolean changed = false;
+        SubscriptionGroup keeper = groups.get(keeperIndex);
+        if (!name.equals(keeper.name) && isCanonicalizableName(keeper.name, name)) {
+            groups.set(keeperIndex, new SubscriptionGroup(keeper.id, name, keeper.boards));
+            changed = true;
+        }
+
+        for (int i = groups.size() - 1; i >= 0; i--) {
+            if (i == keeperIndex) {
+                continue;
+            }
+            SubscriptionGroup group = groups.get(i);
+            if (sameBoardSet(group.boards, boards) && isDefaultLikeGroup(group, id, name)) {
+                groups.remove(i);
+                changed = true;
+                if (i < keeperIndex) {
+                    keeperIndex--;
+                }
+            }
+        }
+        return changed;
+    }
+
+    private static boolean removeUnchangedLegacyAggregate(List<SubscriptionGroup> groups) {
+        for (int i = 0; i < groups.size(); i++) {
+            SubscriptionGroup group = groups.get(i);
+            if (isUnchangedLegacyAggregate(group)) {
+                groups.remove(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isUnchangedLegacyAggregate(SubscriptionGroup group) {
+        if (!LEGACY_AGGREGATE_GROUP_ID.equals(group.id)) {
+            return false;
+        }
+        if (!"综合".equals(group.name) && !"默认订阅".equals(group.name)) {
+            return false;
+        }
+        return sameBoardSet(group.boards, BoardCatalog.defaultGroupBoards())
+                || sameBoardSet(group.boards, legacyS1NgaBoards());
+    }
+
+    private static List<BoardDefinition> legacyS1NgaBoards() {
+        return BoardCatalog.merge(
+                BoardCatalog.defaultS1GroupBoards(),
+                BoardCatalog.defaultNgaGroupBoards()
+        );
+    }
+
+    private static int indexOfDefaultLikeGroup(
+            List<SubscriptionGroup> groups,
+            String id,
+            String name,
+            List<BoardDefinition> boards
+    ) {
+        for (int i = 0; i < groups.size(); i++) {
+            SubscriptionGroup group = groups.get(i);
+            if (sameBoardSet(group.boards, boards) && isDefaultLikeGroup(group, id, name)) {
+                return i;
+            }
+        }
+        int explicitIndex = indexOfGroup(groups, id);
+        if (explicitIndex >= 0) {
+            return explicitIndex;
+        }
+        return -1;
+    }
+
+    private static boolean isDefaultLikeGroup(SubscriptionGroup group, String id, String name) {
+        return group.id.equals(id) || isCanonicalizableName(group.name, name);
+    }
+
+    private static boolean isCanonicalizableName(String currentName, String canonicalName) {
+        return normalizeGroupName(currentName).equals(normalizeGroupName(canonicalName));
+    }
+
+    private static String normalizeGroupName(String name) {
+        return name.replace(".", "")
+                .replace(" ", "")
+                .toLowerCase(Locale.ROOT);
+    }
+
+    private static boolean sameBoardSet(List<BoardDefinition> first, List<BoardDefinition> second) {
+        if (first.size() != second.size()) {
+            return false;
+        }
+        Set<String> keys = new HashSet<>();
+        for (BoardDefinition board : first) {
+            keys.add(board.key());
+        }
+        for (BoardDefinition board : second) {
+            if (!keys.remove(board.key())) {
+                return false;
+            }
+        }
+        return keys.isEmpty();
+    }
+
+    private static void ensureSelectedGroupExists(Context context, List<SubscriptionGroup> groups) {
+        if (groups.isEmpty()) {
+            return;
+        }
+        String selectedId = selectedGroupId(context);
+        if (indexOfGroup(groups, selectedId) >= 0) {
+            return;
+        }
+        setSelectedGroupId(context, groups.get(0).id);
     }
 
     private static int indexOfGroup(List<SubscriptionGroup> groups, String id) {

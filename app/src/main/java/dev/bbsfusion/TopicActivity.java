@@ -52,6 +52,7 @@ public final class TopicActivity extends Activity {
     private TextView titleView;
     private TextView statusView;
     private Button loadMoreButton;
+    private ScrollView scrollView;
 
     private ForumConnector connector;
     private String topicUrl;
@@ -115,7 +116,10 @@ public final class TopicActivity extends Activity {
         statusView.setPadding(dp(16), 0, dp(16), dp(12));
         root.addView(statusView);
 
-        ScrollView scrollView = new ScrollView(this);
+        scrollView = new ScrollView(this);
+        scrollView.setOnScrollChangeListener((v, scrollX, scrollY, oldScrollX, oldScrollY) ->
+                maybeAutoLoadMore()
+        );
         postsContainer = new LinearLayout(this);
         postsContainer.setOrientation(LinearLayout.VERTICAL);
         postsContainer.setPadding(0, 0, 0, dp(24));
@@ -129,7 +133,7 @@ public final class TopicActivity extends Activity {
 
         loadMoreButton = makeButton("加载更多");
         loadMoreButton.setVisibility(View.GONE);
-        loadMoreButton.setOnClickListener(v -> loadTopicPage(loadedPage + 1, true));
+        loadMoreButton.setEnabled(false);
         root.addView(loadMoreButton, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(44)
@@ -183,6 +187,7 @@ public final class TopicActivity extends Activity {
         hasMorePages = detail.hasMore;
         updateLoadMoreButton();
         statusView.setText("已加载 " + detail.posts.size() + " 段内容。");
+        mainHandler.post(this::maybeAutoLoadMore);
     }
 
     private void appendTopic(TopicDetail detail) {
@@ -193,15 +198,31 @@ public final class TopicActivity extends Activity {
         hasMorePages = detail.hasMore && !detail.posts.isEmpty();
         updateLoadMoreButton();
         statusView.setText("已加载到第 " + loadedPage + " 页，新增 " + detail.posts.size() + " 段内容。");
+        mainHandler.post(this::maybeAutoLoadMore);
     }
 
     private void updateLoadMoreButton() {
         if (loadMoreButton == null) {
             return;
         }
-        loadMoreButton.setVisibility(hasMorePages || isLoadingPage ? View.VISIBLE : View.GONE);
-        loadMoreButton.setEnabled(hasMorePages && !isLoadingPage);
-        loadMoreButton.setText(isLoadingPage ? "正在加载..." : "加载更多");
+        loadMoreButton.setVisibility(hasMorePages && isLoadingPage ? View.VISIBLE : View.GONE);
+        loadMoreButton.setEnabled(false);
+        loadMoreButton.setText("正在加载更多...");
+    }
+
+    private void maybeAutoLoadMore() {
+        if (!hasMorePages || isLoadingPage || scrollView == null || postsContainer == null) {
+            return;
+        }
+        View child = scrollView.getChildAt(0);
+        if (child == null) {
+            return;
+        }
+        int visibleBottom = scrollView.getScrollY() + scrollView.getHeight();
+        int remaining = child.getBottom() - visibleBottom;
+        if (remaining <= dp(280)) {
+            loadTopicPage(loadedPage + 1, true);
+        }
     }
 
     private void addPostText(String author, String content) {

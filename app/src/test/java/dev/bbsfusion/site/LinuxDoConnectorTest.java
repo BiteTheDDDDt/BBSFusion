@@ -75,7 +75,7 @@ public final class LinuxDoConnectorTest {
         JSONObject root = new JSONObject(
                 "{"
                         + "\"title\":\"帖子标题\","
-                        + "\"post_stream\":{\"posts\":[{"
+                        + "\"post_stream\":{\"stream\":[101,102],\"posts\":[{"
                         + "\"display_username\":\"alice\","
                         + "\"avatar_template\":\"/user_avatar/linux.do/alice/{size}/1_2.png\","
                         + "\"created_at\":\"2026-06-08T07:10:00.000Z\","
@@ -96,6 +96,36 @@ public final class LinuxDoConnectorTest {
         assertEquals("回复 #2", post.replyContext);
         assertEquals("正文", post.content);
         assertEquals("https://linux.do/uploads/default/original/1/sample.png", post.imageUrls.get(0));
+    }
+
+    @Test
+    public void sortsDiscourseJsonPostsByPostNumber() throws Exception {
+        JSONObject root = new JSONObject(
+                "{"
+                        + "\"title\":\"帖子标题\","
+                        + "\"post_stream\":{\"stream\":[101,102],\"posts\":["
+                        + "{"
+                        + "\"id\":102,"
+                        + "\"post_number\":2,"
+                        + "\"display_username\":\"bob\","
+                        + "\"cooked\":\"<p>二楼</p>\""
+                        + "},"
+                        + "{"
+                        + "\"id\":101,"
+                        + "\"post_number\":1,"
+                        + "\"display_username\":\"alice\","
+                        + "\"cooked\":\"<p>一楼</p>\""
+                        + "}"
+                        + "]}"
+                        + "}"
+        );
+
+        TopicDetail detail = LinuxDoConnector.parseTopicFromJson(root, "https://linux.do/t/topic/1");
+
+        assertEquals("alice", detail.posts.get(0).author);
+        assertEquals("一楼", detail.posts.get(0).content);
+        assertEquals("bob", detail.posts.get(1).author);
+        assertEquals("二楼", detail.posts.get(1).content);
     }
 
     @Test
@@ -130,6 +160,22 @@ public final class LinuxDoConnectorTest {
     }
 
     @Test
+    public void buildsTopicJsonRequestUrlWithDiscourseQuery() {
+        assertEquals(
+                "https://linux.do/t/sample-topic/201.json?track_visit=false&forceLoad=true",
+                LinuxDoConnector.topicJsonRequestUrl("https://linux.do/t/sample-topic/201.json")
+        );
+    }
+
+    @Test
+    public void buildsTopicPostsPaginationUrl() {
+        assertEquals(
+                "https://linux.do/t/201/posts.json?include_suggested=false&post_ids%5B%5D=101&post_ids%5B%5D=102",
+                LinuxDoConnector.postsJsonUrlForTopic("201", List.of("101", "102"))
+        );
+    }
+
+    @Test
     public void extractsTopicPostsFromRssFallback() {
         Document document = Jsoup.parse(
                 "<rss><channel>"
@@ -157,6 +203,36 @@ public final class LinuxDoConnectorTest {
         assertEquals("bob", detail.posts.get(1).author);
         assertEquals("回复正文", detail.posts.get(1).content);
         assertTrue(detail.posts.get(1).meta.startsWith("发表于 "));
+    }
+
+    @Test
+    public void sortsRssFallbackRepliesOldestFirst() {
+        Document document = Jsoup.parse(
+                "<rss><channel>"
+                        + "<title>RSS 帖子标题</title>"
+                        + "<description><![CDATA[<p>楼主正文</p>]]></description>"
+                        + "<item>"
+                        + "<dc:creator><![CDATA[newer]]></dc:creator>"
+                        + "<description><![CDATA[<p>较新的回复</p>]]></description>"
+                        + "<pubDate>Tue, 09 Jun 2026 07:16:45 +0000</pubDate>"
+                        + "</item>"
+                        + "<item>"
+                        + "<dc:creator><![CDATA[older]]></dc:creator>"
+                        + "<description><![CDATA[<p>较旧的回复</p>]]></description>"
+                        + "<pubDate>Tue, 09 Jun 2026 06:16:45 +0000</pubDate>"
+                        + "</item>"
+                        + "</channel></rss>",
+                "https://linux.do/t/sample-topic/201.rss",
+                Parser.xmlParser()
+        );
+
+        TopicDetail detail = LinuxDoConnector.parseTopicFromRss(document, "https://linux.do/t/sample-topic/201");
+
+        assertEquals("主题", detail.posts.get(0).author);
+        assertEquals("older", detail.posts.get(1).author);
+        assertEquals("较旧的回复", detail.posts.get(1).content);
+        assertEquals("newer", detail.posts.get(2).author);
+        assertEquals("较新的回复", detail.posts.get(2).content);
     }
 
     @Test

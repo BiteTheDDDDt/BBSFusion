@@ -20,6 +20,8 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +37,7 @@ public final class LinuxDoConnector implements ForumConnector {
     private static final Pattern CATEGORY_ID = Pattern.compile("^c:([^:]+):(\\d+)$");
     private static final Pattern TOPIC_ID = Pattern.compile("/t/(?:[^/]+/)?(\\d+)");
     private static final Pattern RSS_POST_COUNT = Pattern.compile("(\\d+)\\s*个帖子");
+    private static final int POSTS_PAGE_SIZE = 20;
     private static final DateTimeFormatter TIME_FORMATTER =
             DateTimeFormatter.ofPattern("M-d HH:mm").withZone(ZoneId.of("Asia/Shanghai"));
     private static final DateTimeFormatter POST_TIME_FORMATTER =
@@ -135,13 +138,16 @@ public final class LinuxDoConnector implements ForumConnector {
 
     @Override
     public TopicDetail fetchTopic(String url) throws IOException {
+        return fetchTopicPage(url, 1);
+    }
+
+    @Override
+    public TopicDetail fetchTopicPage(String url, int page) throws IOException {
+        int pageNumber = Math.max(1, page);
         IOException firstError = null;
         for (String jsonUrl : jsonUrlsForTopic(url)) {
             try {
-                TopicDetail detail = parseTopicFromJson(
-                        NetworkClient.getJsonObject(jsonUrl, url),
-                        url
-                );
+                TopicDetail detail = fetchTopicPageFromJson(jsonUrl, url, pageNumber);
                 if (!detail.posts.isEmpty()) {
                     return detail;
                 }
@@ -150,6 +156,13 @@ public final class LinuxDoConnector implements ForumConnector {
                     firstError = error;
                 }
             }
+        }
+
+        if (pageNumber > 1) {
+            if (firstError != null) {
+                throw firstError;
+            }
+            return new TopicDetail("帖子详情", url, new ArrayList<>(), pageNumber, false);
         }
 
         for (String rssUrl : rssUrlsForTopic(url)) {
@@ -174,6 +187,48 @@ public final class LinuxDoConnector implements ForumConnector {
             }
             throw htmlError;
         }
+    }
+
+    private TopicDetail fetchTopicPageFromJson(
+            String jsonUrl,
+            String topicUrl,
+            int pageNumber
+    ) throws IOException {
+        JSONObject root = NetworkClient.getJsonObject(topicJsonRequestUrl(jsonUrl), topicUrl);
+        if (pageNumber <= 1) {
+            return parseTopicFromJson(root, topicUrl, 1);
+        }
+
+        JSONArray streamIds = streamIds(root);
+        int start = (pageNumber - 1) * POSTS_PAGE_SIZE;
+        if (streamIds.length() <= start) {
+            return new TopicDetail(topicTitle(root), topicUrl, new ArrayList<>(), pageNumber, false);
+        }
+
+        List<String> postIds = new ArrayList<>();
+        for (int i = start; i < streamIds.length() && postIds.size() < POSTS_PAGE_SIZE; i++) {
+            String postId = String.valueOf(streamIds.optLong(i, 0L));
+            if (!"0".equals(postId)) {
+                postIds.add(postId);
+            }
+        }
+        if (postIds.isEmpty()) {
+            return new TopicDetail(topicTitle(root), topicUrl, new ArrayList<>(), pageNumber, false);
+        }
+
+        String topicId = firstNonEmpty(topicIdFromUrl(topicUrl), topicIdFromUrl(jsonUrl));
+        String postsUrl = postsJsonUrlForTopic(topicId, postIds);
+        if (postsUrl.isEmpty()) {
+            return new TopicDetail(topicTitle(root), topicUrl, new ArrayList<>(), pageNumber, false);
+        }
+        JSONObject postsRoot = NetworkClient.getJsonObject(postsUrl, topicUrl);
+        return parseTopicFromJson(
+                postsRoot,
+                topicUrl,
+                pageNumber,
+                start + postIds.size() < streamIds.length(),
+                topicTitle(root)
+        );
     }
 
     static List<TopicSummary> parseTopicsFromJson(JSONObject root, BoardDefinition board) {
@@ -322,44 +377,44 @@ public final class LinuxDoConnector implements ForumConnector {
     }
 
     static TopicDetail parseTopicFromJson(JSONObject root, String url) {
-        String title = root.optString("title", "").trim();
+        return parseTopicFromJson(root, url, 1);
+    }
+
+    static TopicDetail parseTopicFromJson(JSONObject root, String url, int pageNumber) {
+        return parseTopicFromJson(
+                root,
+                url,
+                pageNumber,
+                streamIds(root).length() > pageNumber * POSTS_PAGE_SIZE,
+                topicTitle(root)
+        );
+    }
+
+    static TopicDetail parseTopicFromJson(
+            JSONObject root,
+            String url,
+            int pageNumber,
+            boolean hasMore,
+            String titleFallback
+    ) {
+        String title = firstNonEmpty(topicTitle(root), titleFallback);
         List<Post> posts = new ArrayList<>();
         JSONObject stream = root.optJSONObject("post_stream");
         JSONArray array = stream == null ? null : stream.optJSONArray("posts");
         if (array == null) {
-            return new TopicDetail(title.isEmpty() ? "帖子详情" : title, url, posts);
+            return new TopicDetail(title.isEmpty() ? "帖子详情" : title, url, posts, pageNumber, false);
         }
 
-        for (int i = 0; i < array.length() && posts.size() < 80; i++) {
-            JSONObject item = array.optJSONObject(i);
-            if (item == null) {
-                continue;
+        for (JsonPost jsonPost : sortedJsonPosts(array)) {
+            Post post = postFromJson(jsonPost.item, posts.size() + 1);
+            if (post != null) {
+                posts.add(post);
             }
-            ParsedContent content = parsedCooked(item.optString("cooked", ""));
-            if (content.text.isEmpty() && content.imageUrls.isEmpty()) {
-                continue;
+            if (posts.size() >= 80) {
+                break;
             }
-            String replyContext = content.replyContext;
-            int replyTo = item.optInt("reply_to_post_number", 0);
-            if (replyContext.isEmpty() && replyTo > 0) {
-                replyContext = "回复 #" + replyTo;
-            }
-            posts.add(new Post(
-                    firstNonEmpty(
-                            item.optString("display_username", ""),
-                            item.optString("username", ""),
-                            item.optString("name", ""),
-                            "楼层 " + (posts.size() + 1)
-                    ),
-                    discourseAvatar(item.optString("avatar_template", "")),
-                    postMeta(item),
-                    replyContext,
-                    content.text,
-                    content.imageUrls,
-                    content.inlineImages
-            ));
         }
-        return new TopicDetail(title.isEmpty() ? "帖子详情" : title, url, posts);
+        return new TopicDetail(title.isEmpty() ? "帖子详情" : title, url, posts, pageNumber, hasMore);
     }
 
     static TopicDetail parseTopicFromHtml(Document document, String url) {
@@ -418,7 +473,7 @@ public final class LinuxDoConnector implements ForumConnector {
                 topicDescription.inlineImages
         ));
 
-        for (Element item : document.select("item")) {
+        for (Element item : sortedRssItems(document)) {
             ParsedContent content = parsedRssDescription(firstText(item, "description"), url);
             if (content.text.isEmpty() && content.imageUrls.isEmpty()) {
                 continue;
@@ -512,6 +567,103 @@ public final class LinuxDoConnector implements ForumConnector {
             return jsonUrl.substring(0, jsonUrl.length() - ".json".length()) + ".rss";
         }
         return "";
+    }
+
+    static String topicJsonRequestUrl(String jsonUrl) {
+        if (jsonUrl == null || jsonUrl.trim().isEmpty()) {
+            return "";
+        }
+        String separator = jsonUrl.contains("?") ? "&" : "?";
+        return jsonUrl + separator + "track_visit=false&forceLoad=true";
+    }
+
+    static String postsJsonUrlForTopic(String topicId, List<String> postIds) {
+        if (topicId == null || topicId.trim().isEmpty() || postIds == null || postIds.isEmpty()) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder(BASE_URL)
+                .append("/t/")
+                .append(topicId.trim())
+                .append("/posts.json?include_suggested=false");
+        for (String postId : postIds) {
+            if (postId != null && !postId.trim().isEmpty()) {
+                builder.append("&post_ids%5B%5D=").append(postId.trim());
+            }
+        }
+        return builder.toString();
+    }
+
+    private static String topicTitle(JSONObject root) {
+        return root == null ? "" : root.optString("title", "").trim();
+    }
+
+    private static JSONArray streamIds(JSONObject root) {
+        JSONObject stream = root == null ? null : root.optJSONObject("post_stream");
+        JSONArray ids = stream == null ? null : stream.optJSONArray("stream");
+        return ids == null ? new JSONArray() : ids;
+    }
+
+    private static List<JsonPost> sortedJsonPosts(JSONArray array) {
+        List<JsonPost> posts = new ArrayList<>();
+        for (int i = 0; i < array.length(); i++) {
+            JSONObject item = array.optJSONObject(i);
+            if (item != null) {
+                posts.add(new JsonPost(item, i));
+            }
+        }
+        Collections.sort(posts, (left, right) -> {
+            int leftNumber = left.item.optInt("post_number", 0);
+            int rightNumber = right.item.optInt("post_number", 0);
+            if (leftNumber > 0 && rightNumber > 0 && leftNumber != rightNumber) {
+                return Integer.compare(leftNumber, rightNumber);
+            }
+            return Integer.compare(left.index, right.index);
+        });
+        return posts;
+    }
+
+    private static Post postFromJson(JSONObject item, int fallbackNumber) {
+        ParsedContent content = parsedCooked(item.optString("cooked", ""));
+        if (content.text.isEmpty() && content.imageUrls.isEmpty()) {
+            return null;
+        }
+        String replyContext = content.replyContext;
+        int replyTo = item.optInt("reply_to_post_number", 0);
+        if (replyContext.isEmpty() && replyTo > 0) {
+            replyContext = "回复 #" + replyTo;
+        }
+        int postNumber = item.optInt("post_number", fallbackNumber);
+        return new Post(
+                firstNonEmpty(
+                        item.optString("display_username", ""),
+                        item.optString("username", ""),
+                        item.optString("name", ""),
+                        "楼层 " + Math.max(1, postNumber)
+                ),
+                discourseAvatar(item.optString("avatar_template", "")),
+                postMeta(item),
+                replyContext,
+                content.text,
+                content.imageUrls,
+                content.inlineImages
+        );
+    }
+
+    private static List<Element> sortedRssItems(Document document) {
+        List<Element> items = new ArrayList<>(document.select("item"));
+        boolean allDated = !items.isEmpty();
+        for (Element item : items) {
+            if (parseRssDateMillis(firstText(item, "pubDate")) <= 0L) {
+                allDated = false;
+                break;
+            }
+        }
+        if (allDated) {
+            Collections.sort(items, Comparator.comparingLong(
+                    item -> parseRssDateMillis(firstText(item, "pubDate"))
+            ));
+        }
+        return items;
     }
 
     static String postMeta(JSONObject item) {
@@ -887,6 +1039,16 @@ public final class LinuxDoConnector implements ForumConnector {
             this.replyContext = replyContext;
             this.imageUrls = imageUrls;
             this.inlineImages = inlineImages;
+        }
+    }
+
+    private static final class JsonPost {
+        final JSONObject item;
+        final int index;
+
+        JsonPost(JSONObject item, int index) {
+            this.item = item;
+            this.index = index;
         }
     }
 }

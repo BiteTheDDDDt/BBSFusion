@@ -99,6 +99,67 @@ public final class LinuxDoConnectorTest {
     }
 
     @Test
+    public void buildsTopicJsonUrlWithSlugBeforeIdFallback() {
+        List<String> urls = LinuxDoConnector.jsonUrlsForTopic(
+                "https://linux.do/t/sample-topic/201?u=alice#post_3"
+        );
+
+        assertEquals(2, urls.size());
+        assertEquals("https://linux.do/t/sample-topic/201.json", urls.get(0));
+        assertEquals("https://linux.do/t/201.json", urls.get(1));
+    }
+
+    @Test
+    public void keepsExistingTopicJsonUrl() {
+        List<String> urls = LinuxDoConnector.jsonUrlsForTopic("https://linux.do/t/sample-topic/201.json");
+
+        assertEquals(2, urls.size());
+        assertEquals("https://linux.do/t/sample-topic/201.json", urls.get(0));
+        assertEquals("https://linux.do/t/201.json", urls.get(1));
+    }
+
+    @Test
+    public void buildsTopicRssUrlWithSlugBeforeIdFallback() {
+        List<String> urls = LinuxDoConnector.rssUrlsForTopic(
+                "https://linux.do/t/sample-topic/201?u=alice#post_3"
+        );
+
+        assertEquals(2, urls.size());
+        assertEquals("https://linux.do/t/sample-topic/201.rss", urls.get(0));
+        assertEquals("https://linux.do/t/201.rss", urls.get(1));
+    }
+
+    @Test
+    public void extractsTopicPostsFromRssFallback() {
+        Document document = Jsoup.parse(
+                "<rss><channel>"
+                        + "<title>RSS 帖子标题</title>"
+                        + "<link>https://linux.do/t/sample-topic/201</link>"
+                        + "<description><![CDATA[<p>楼主正文</p>]]></description>"
+                        + "<item>"
+                        + "<title>RSS 帖子标题</title>"
+                        + "<dc:creator><![CDATA[bob]]></dc:creator>"
+                        + "<description><![CDATA[<p>回复正文</p>"
+                        + "<p><a href=\"https://linux.do/t/sample-topic/201/2\">阅读完整话题</a></p>]]></description>"
+                        + "<pubDate>Tue, 09 Jun 2026 06:16:45 +0000</pubDate>"
+                        + "</item>"
+                        + "</channel></rss>",
+                "https://linux.do/t/sample-topic/201.rss",
+                Parser.xmlParser()
+        );
+
+        TopicDetail detail = LinuxDoConnector.parseTopicFromRss(document, "https://linux.do/t/sample-topic/201");
+
+        assertEquals("RSS 帖子标题", detail.title);
+        assertEquals(2, detail.posts.size());
+        assertEquals("主题", detail.posts.get(0).author);
+        assertEquals("楼主正文", detail.posts.get(0).content);
+        assertEquals("bob", detail.posts.get(1).author);
+        assertEquals("回复正文", detail.posts.get(1).content);
+        assertTrue(detail.posts.get(1).meta.startsWith("发表于 "));
+    }
+
+    @Test
     public void extractsTopicsFromCrawlerHtml() {
         Document document = Jsoup.parse(
                 "<a href=\"/t/sample-topic/201\">一个 HTML 主题</a>"

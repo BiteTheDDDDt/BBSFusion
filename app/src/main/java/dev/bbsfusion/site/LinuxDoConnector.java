@@ -135,19 +135,33 @@ public final class LinuxDoConnector implements ForumConnector {
 
     @Override
     public TopicDetail fetchTopic(String url) throws IOException {
-        String topicId = topicIdFromUrl(url);
-        IOException jsonError = null;
-        if (!topicId.isEmpty()) {
+        IOException firstError = null;
+        for (String jsonUrl : jsonUrlsForTopic(url)) {
             try {
                 TopicDetail detail = parseTopicFromJson(
-                        NetworkClient.getJsonObject(BASE_URL + "/t/" + topicId + ".json", HOME_URL),
+                        NetworkClient.getJsonObject(jsonUrl, url),
                         url
                 );
                 if (!detail.posts.isEmpty()) {
                     return detail;
                 }
             } catch (IOException error) {
-                jsonError = error;
+                if (firstError == null) {
+                    firstError = error;
+                }
+            }
+        }
+
+        for (String rssUrl : rssUrlsForTopic(url)) {
+            try {
+                TopicDetail detail = parseTopicFromRss(NetworkClient.getXml(rssUrl, url), url);
+                if (!detail.posts.isEmpty()) {
+                    return detail;
+                }
+            } catch (IOException error) {
+                if (firstError == null) {
+                    firstError = error;
+                }
             }
         }
 
@@ -155,8 +169,8 @@ public final class LinuxDoConnector implements ForumConnector {
             Document document = NetworkClient.getDesktop(url, HOME_URL);
             return parseTopicFromHtml(document, url);
         } catch (IOException htmlError) {
-            if (jsonError != null) {
-                throw jsonError;
+            if (firstError != null) {
+                throw firstError;
             }
             throw htmlError;
         }
@@ -385,12 +399,119 @@ public final class LinuxDoConnector implements ForumConnector {
         return new TopicDetail(title.isEmpty() ? "帖子详情" : title, url, posts);
     }
 
+    static TopicDetail parseTopicFromRss(Document document, String url) {
+        String title = clean(firstText(document, "channel > title", "title"));
+        List<Post> posts = new ArrayList<>();
+        List<String> seenContent = new ArrayList<>();
+
+        ParsedContent topicDescription = parsedRssDescription(
+                firstText(document, "channel > description"),
+                url
+        );
+        addRssPostIfPresent(posts, seenContent, new Post(
+                "主题",
+                "",
+                "",
+                topicDescription.replyContext,
+                topicDescription.text,
+                topicDescription.imageUrls,
+                topicDescription.inlineImages
+        ));
+
+        for (Element item : document.select("item")) {
+            ParsedContent content = parsedRssDescription(firstText(item, "description"), url);
+            if (content.text.isEmpty() && content.imageUrls.isEmpty()) {
+                continue;
+            }
+            String author = firstNonEmpty(
+                    firstText(item, "dc\\:creator", "dc|creator", "creator", "author"),
+                    "楼层 " + (posts.size() + 1)
+            );
+            String meta = postMetaFromRssDate(firstText(item, "pubDate"));
+            addRssPostIfPresent(posts, seenContent, new Post(
+                    author,
+                    "",
+                    meta,
+                    content.replyContext,
+                    content.text,
+                    content.imageUrls,
+                    content.inlineImages
+            ));
+            if (posts.size() >= 80) {
+                break;
+            }
+        }
+        return new TopicDetail(title.isEmpty() ? "帖子详情" : title, url, posts);
+    }
+
     static String topicIdFromUrl(String url) {
         if (url == null) {
             return "";
         }
         Matcher matcher = TOPIC_ID.matcher(url);
         return matcher.find() ? matcher.group(1) : "";
+    }
+
+    static List<String> jsonUrlsForTopic(String url) {
+        List<String> urls = new ArrayList<>();
+        String primary = jsonUrlForTopic(url);
+        if (!primary.isEmpty()) {
+            urls.add(primary);
+        }
+
+        String topicId = topicIdFromUrl(url);
+        if (!topicId.isEmpty()) {
+            addIfMissing(urls, BASE_URL + "/t/" + topicId + ".json");
+        }
+        return urls;
+    }
+
+    static List<String> rssUrlsForTopic(String url) {
+        List<String> urls = new ArrayList<>();
+        String primary = rssUrlForTopic(url);
+        if (!primary.isEmpty()) {
+            urls.add(primary);
+        }
+
+        String topicId = topicIdFromUrl(url);
+        if (!topicId.isEmpty()) {
+            addIfMissing(urls, BASE_URL + "/t/" + topicId + ".rss");
+        }
+        return urls;
+    }
+
+    static String jsonUrlForTopic(String url) {
+        String value = absoluteLinuxDoUrl(url);
+        if (value.isEmpty()) {
+            return "";
+        }
+
+        int fragment = value.indexOf('#');
+        if (fragment >= 0) {
+            value = value.substring(0, fragment);
+        }
+        int query = value.indexOf('?');
+        if (query >= 0) {
+            value = value.substring(0, query);
+        }
+        while (value.endsWith("/")) {
+            value = value.substring(0, value.length() - 1);
+        }
+        if (value.endsWith(".json")) {
+            return value;
+        }
+        if (topicIdFromUrl(value).isEmpty()) {
+            return "";
+        }
+        return value + ".json";
+    }
+
+    static String rssUrlForTopic(String url) {
+        String jsonUrl = jsonUrlForTopic(url);
+        if (jsonUrl.endsWith(".json")) {
+            return jsonUrl.substring(0, jsonUrl.length() - ".json".length()) + ".rss";
+        }
+        return "";
     }
 
     static String postMeta(JSONObject item) {
@@ -424,6 +545,14 @@ public final class LinuxDoConnector implements ForumConnector {
         if (millis <= 0L) {
             String text = clean(time.text());
             return text.isEmpty() ? "" : "发表于 " + text;
+        }
+        return "发表于 " + POST_TIME_FORMATTER.format(Instant.ofEpochMilli(millis));
+    }
+
+    private static String postMetaFromRssDate(String value) {
+        long millis = parseRssDateMillis(value);
+        if (millis <= 0L) {
+            return "";
         }
         return "发表于 " + POST_TIME_FORMATTER.format(Instant.ofEpochMilli(millis));
     }
@@ -474,6 +603,15 @@ public final class LinuxDoConnector implements ForumConnector {
             return;
         }
         boards.add(linuxDoBoard(slug, String.valueOf(categoryId), name));
+    }
+
+    private static void addIfMissing(List<String> values, String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return;
+        }
+        if (!values.contains(value)) {
+            values.add(value);
+        }
     }
 
     private static BoardDefinition linuxDoBoard(String slug, String categoryId, String title) {
@@ -538,6 +676,40 @@ public final class LinuxDoConnector implements ForumConnector {
         }
         String text = HtmlText.textWithLineBreaks(document.body());
         return new ParsedContent(text, replyContext, imageUrls, inlineImages);
+    }
+
+    private static ParsedContent parsedRssDescription(String html, String topicUrl) {
+        Document document = Jsoup.parse(html == null ? "" : html, BASE_URL + "/");
+        String topicId = topicIdFromUrl(topicUrl);
+        for (Element anchor : document.select("a[href]")) {
+            String text = clean(anchor.text()).toLowerCase();
+            String hrefTopicId = topicIdFromUrl(anchor.attr("href"));
+            boolean readFullTopicLink = text.contains("阅读完整话题")
+                    || text.contains("read full topic")
+                    || text.contains("read full discussion");
+            if (readFullTopicLink || (!topicId.isEmpty() && topicId.equals(hrefTopicId))) {
+                anchor.remove();
+            }
+        }
+        return parsedCooked(document.body().html());
+    }
+
+    private static void addRssPostIfPresent(
+            List<Post> posts,
+            List<String> seenContent,
+            Post post
+    ) {
+        String contentKey = clean(post.content);
+        if (contentKey.isEmpty() && post.imageUrls.isEmpty()) {
+            return;
+        }
+        if (!contentKey.isEmpty() && seenContent.contains(contentKey)) {
+            return;
+        }
+        if (!contentKey.isEmpty()) {
+            seenContent.add(contentKey);
+        }
+        posts.add(post);
     }
 
     private static String extractReplyContext(Document document) {

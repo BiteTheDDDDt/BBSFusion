@@ -64,6 +64,19 @@ public final class V2exConnectorTest {
 
         assertEquals("正文 :smile: 后续", content.text);
         assertEquals(0, content.imageUrls.size());
+        assertEquals(1, content.inlineImages.size());
+        assertEquals("https://www.v2ex.com/emoji/smile.png", content.inlineImages.get(0).sourceUrl);
+    }
+
+    @Test
+    public void separatesBlockquoteFromRenderedText() {
+        V2exConnector.ParsedContent content = V2exConnector.parsedContent(
+                "<blockquote>被回复的内容</blockquote><p>回复正文</p>",
+                ""
+        );
+
+        assertEquals("引用：被回复的内容", content.replyContext);
+        assertEquals("回复正文", content.text);
     }
 
     @Test

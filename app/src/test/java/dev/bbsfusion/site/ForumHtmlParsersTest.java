@@ -127,6 +127,28 @@ public final class ForumHtmlParsersTest {
 
         assertEquals("正文前 [笑] 正文后，这是一段足够长的内容。", detail.posts.get(0).content);
         assertEquals(0, detail.posts.get(0).imageUrls.size());
+        assertEquals(1, detail.posts.get(0).inlineImages.size());
+        assertEquals(
+                "https://stage1st.com/2b/static/image/smiley/default/lol.gif",
+                detail.posts.get(0).inlineImages.get(0).sourceUrl
+        );
+    }
+
+    @Test
+    public void separatesDiscuzQuoteFromPostText() {
+        Document document = Jsoup.parse(
+                "<div id=\"post_1\"><table id=\"pid1\"><tr><td>" +
+                        "<div class=\"authi\"><a class=\"xw1\">alice</a></div>" +
+                        "<td class=\"t_f\" id=\"postmessage_1\">" +
+                        "<div class=\"quote\"><blockquote>bob 发表于 2026-6-8 17:50 原文内容</blockquote></div>" +
+                        "回复正文，这是一段足够长的内容。</td></td></tr></table></div>",
+                "https://stage1st.com/2b/"
+        );
+
+        TopicDetail detail = ForumHtmlParsers.extractTopic(document, "https://stage1st.com/2b/thread-1-1-1.html");
+
+        assertEquals("引用：bob 发表于 2026-6-8 17:50 原文内容", detail.posts.get(0).replyContext);
+        assertEquals("回复正文，这是一段足够长的内容。", detail.posts.get(0).content);
     }
 
     @Test

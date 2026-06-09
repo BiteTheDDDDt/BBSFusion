@@ -220,7 +220,8 @@ public final class ForumHtmlParsers {
         for (String selector : selectors) {
             Elements elements = document.select(selector);
             for (Element element : elements) {
-                String text = contentText(element);
+                ParsedPostContent content = parsedPostContent(element);
+                String text = content.text;
                 List<String> imageUrls = extractPostImages(element);
                 if (text.length() < 12 && imageUrls.isEmpty()) {
                     continue;
@@ -229,7 +230,15 @@ public final class ForumHtmlParsers {
                 if (!seen.add(seenKey)) {
                     continue;
                 }
-                posts.add(new Post(fallbackAuthor(posts.size()), "", "", text, imageUrls));
+                posts.add(new Post(
+                        fallbackAuthor(posts.size()),
+                        "",
+                        "",
+                        content.replyContext,
+                        text,
+                        imageUrls,
+                        content.inlineImages
+                ));
                 if (posts.size() >= 40) {
                     return posts;
                 }
@@ -273,7 +282,8 @@ public final class ForumHtmlParsers {
                 continue;
             }
 
-            String content = contentText(contentElement);
+            ParsedPostContent parsedContent = parsedPostContent(contentElement);
+            String content = parsedContent.text;
             List<String> imageUrls = extractPostImages(contentElement);
             if (content.length() < 12 && imageUrls.isEmpty()) {
                 continue;
@@ -289,7 +299,15 @@ public final class ForumHtmlParsers {
             }
             String avatarUrl = extractPostAvatar(container);
             String meta = extractPostMeta(container);
-            posts.add(new Post(author, avatarUrl, meta, content, imageUrls));
+            posts.add(new Post(
+                    author,
+                    avatarUrl,
+                    meta,
+                    parsedContent.replyContext,
+                    content,
+                    imageUrls,
+                    parsedContent.inlineImages
+            ));
             if (posts.size() >= 40) {
                 return;
             }
@@ -413,7 +431,7 @@ public final class ForumHtmlParsers {
         List<String> imageUrls = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (Element image : contentElement.select("img")) {
-            if (isInlineEmoticon(image)) {
+            if (isInlineEmoticon(image) || isInReplyBlock(image)) {
                 continue;
             }
             String url = firstImageUrl(image);
@@ -429,16 +447,62 @@ public final class ForumHtmlParsers {
     }
 
     private static String contentText(Element contentElement) {
+        return parsedPostContent(contentElement).text;
+    }
+
+    private static ParsedPostContent parsedPostContent(Element contentElement) {
         Element copy = contentElement.clone();
+        String replyContext = extractReplyContext(copy);
+        copy.select(".quote, blockquote, .blockquote, .reply-to").remove();
+        List<Post.InlineImage> inlineImages = new ArrayList<>();
         for (Element image : copy.select("img")) {
             String label = inlineImageLabel(image);
             if (label.isEmpty()) {
                 image.remove();
             } else {
+                String sourceUrl = firstImageUrl(image);
+                if (!sourceUrl.isEmpty()) {
+                    inlineImages.add(new Post.InlineImage(sourceUrl, label));
+                }
                 image.replaceWith(new TextNode(" " + label + " "));
             }
         }
-        return clean(copy.text());
+        return new ParsedPostContent(clean(copy.text()), replyContext, inlineImages);
+    }
+
+    private static String extractReplyContext(Element contentElement) {
+        Element quote = contentElement.selectFirst(".quote blockquote, .quote, blockquote, .blockquote, .reply-to");
+        if (quote == null) {
+            return "";
+        }
+        String text = clean(quote.text());
+        if (text.isEmpty()) {
+            return "";
+        }
+        return "引用：" + abbreviate(text, 120);
+    }
+
+    private static boolean isInReplyBlock(Element element) {
+        Element cursor = element;
+        while (cursor != null) {
+            String className = cursor.className().toLowerCase(Locale.ROOT);
+            if ("blockquote".equals(cursor.tagName())
+                    || className.contains("quote")
+                    || className.contains("blockquote")
+                    || className.contains("reply-to")) {
+                return true;
+            }
+            cursor = cursor.parent();
+        }
+        return false;
+    }
+
+    private static String abbreviate(String text, int maxLength) {
+        String value = clean(text);
+        if (value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, maxLength).trim() + "...";
     }
 
     private static String firstImageUrl(Element image) {
@@ -792,5 +856,17 @@ public final class ForumHtmlParsers {
             return "发表于 " + time;
         }
         return value.length() > 40 ? "" : value;
+    }
+
+    private static final class ParsedPostContent {
+        final String text;
+        final String replyContext;
+        final List<Post.InlineImage> inlineImages;
+
+        ParsedPostContent(String text, String replyContext, List<Post.InlineImage> inlineImages) {
+            this.text = text;
+            this.replyContext = replyContext;
+            this.inlineImages = inlineImages;
+        }
     }
 }

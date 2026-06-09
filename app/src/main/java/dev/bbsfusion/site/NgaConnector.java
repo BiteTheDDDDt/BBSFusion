@@ -45,6 +45,14 @@ public final class NgaConnector implements ForumConnector {
             "<img[^>]+(?:src|file|zoomfile)=[\"']?([^\"'\\s>]+)",
             Pattern.CASE_INSENSITIVE
     );
+    private static final Pattern QUOTE_BLOCK = Pattern.compile(
+            "\\[quote[^\\]]*\\](.*?)\\[/quote\\]",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL
+    );
+    private static final Pattern PID_REPLY = Pattern.compile(
+            "\\[pid=(\\d+)[^\\]]*\\](.*?)\\[/pid\\]",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL
+    );
     private static final Pattern PLAIN_IMAGE_URL = Pattern.compile(
             "(?i)(?:(?:https?:)?//|attachments/|ngabbs/|\\./mon_|mon_)[^\\s\\]\\[\"'<>]+?\\.(?:jpg|jpeg|png|gif|webp)(?:\\?[^\\s\\]\\[\"'<>]*)?"
     );
@@ -200,15 +208,24 @@ public final class NgaConnector implements ForumConnector {
             }
 
             String rawContent = item.optString("content", "");
-            List<String> imageUrls = imageUrlsFromApiPost(item, rawContent);
-            String content = cleanApiContent(rawContent);
-            if (content.length() < 2 && imageUrls.isEmpty()) {
+            ParsedApiContent parsedContent = parseApiContent(item, rawContent);
+            if (parsedContent.text.length() < 2
+                    && parsedContent.imageUrls.isEmpty()
+                    && parsedContent.inlineImages.isEmpty()) {
                 continue;
             }
             String author = authorFromPostJson(item, json, posts.size());
             String avatarUrl = avatarFromPostJson(item, json);
             String meta = postMetaFromApiPost(item);
-            posts.add(new Post(author, avatarUrl, meta, content, imageUrls));
+            posts.add(new Post(
+                    author,
+                    avatarUrl,
+                    meta,
+                    parsedContent.replyContext,
+                    parsedContent.text,
+                    parsedContent.imageUrls,
+                    parsedContent.inlineImages
+            ));
         }
 
         String title = json.optString("subject", "").trim();
@@ -520,27 +537,51 @@ public final class NgaConnector implements ForumConnector {
         return urls;
     }
 
+    static ParsedApiContent parseApiContent(JSONObject item, String rawContent) {
+        String replyContext = extractReplyContext(rawContent);
+        String content = removeReplyBlocks(rawContent);
+        List<Post.InlineImage> inlineImages = inlineImagesFromHtml(content);
+        List<String> imageUrls = imageUrlsFromApiPost(item, removeInlineHtmlImages(content));
+        String text = cleanApiContent(content);
+        return new ParsedApiContent(text, replyContext, imageUrls, inlineImages);
+    }
+
     static String postMetaFromApiPost(JSONObject item) {
-        long posted = firstPositive(
-                item.optLong("postdate", 0L),
-                item.optLong("post_date", 0L),
-                item.optLong("created", 0L),
-                item.optLong("created_at", 0L)
+        String posted = timeTextFromFields(
+                item,
+                "发表于",
+                "postdate",
+                "postDate",
+                "post_date",
+                "post_time",
+                "posttime",
+                "created",
+                "created_at",
+                "timestamp",
+                "time",
+                "dateline"
         );
-        long edited = firstPositive(
-                item.optLong("lastmodify", 0L),
-                item.optLong("last_modified", 0L),
-                item.optLong("modifytime", 0L),
-                item.optLong("edittime", 0L)
+        String edited = timeTextFromFields(
+                item,
+                "编辑",
+                "lastmodify",
+                "lastModify",
+                "last_modified",
+                "modifytime",
+                "edittime",
+                "lastmodifytime",
+                "last_update",
+                "updated_at",
+                "alterdate",
+                "alter_time"
         );
 
         String meta = "";
-        if (posted > 0L) {
-            meta = "发表于 " + POST_TIME_FORMATTER.format(Instant.ofEpochSecond(posted));
+        if (!posted.isEmpty()) {
+            meta = posted;
         }
-        if (edited > 0L && edited != posted) {
-            String editText = "编辑 " + POST_TIME_FORMATTER.format(Instant.ofEpochSecond(edited));
-            meta = meta.isEmpty() ? editText : meta + " · " + editText;
+        if (!edited.isEmpty() && !edited.equals(posted)) {
+            meta = meta.isEmpty() ? edited : meta + " · " + edited;
         }
 
         String alterInfo = cleanApiContent(firstNonEmpty(
@@ -552,6 +593,159 @@ public final class NgaConnector implements ForumConnector {
             meta = meta.isEmpty() ? alterInfo : meta + " · " + alterInfo;
         }
         return meta;
+    }
+
+    private static String extractReplyContext(String rawContent) {
+        String content = rawContent == null ? "" : rawContent;
+        Matcher quote = QUOTE_BLOCK.matcher(content);
+        if (quote.find()) {
+            String text = cleanApiContent(quote.group(1));
+            if (!text.isEmpty()) {
+                return "引用：" + abbreviate(text, 120);
+            }
+        }
+
+        Matcher pid = PID_REPLY.matcher(content);
+        if (pid.find()) {
+            String label = "回复 #" + pid.group(1);
+            String text = cleanApiContent(pid.group(2));
+            if (!text.isEmpty()) {
+                return label + "：" + abbreviate(text, 80);
+            }
+            return label;
+        }
+        return "";
+    }
+
+    private static String removeReplyBlocks(String rawContent) {
+        String content = rawContent == null ? "" : rawContent;
+        content = QUOTE_BLOCK.matcher(content).replaceAll(" ");
+        return PID_REPLY.matcher(content).replaceAll(" ");
+    }
+
+    private static List<Post.InlineImage> inlineImagesFromHtml(String html) {
+        List<Post.InlineImage> inlineImages = new ArrayList<>();
+        if (html == null || !html.toLowerCase().contains("<img")) {
+            return inlineImages;
+        }
+        Document document = Jsoup.parseBodyFragment(html);
+        for (Element image : document.select("img")) {
+            String label = inlineImageLabel(image);
+            if (label.isEmpty()) {
+                continue;
+            }
+            String source = normalizeNgaInlineImageUrl(firstNonEmpty(
+                    image.attr("zoomfile"),
+                    image.attr("file"),
+                    image.attr("data-original"),
+                    image.attr("data-src"),
+                    image.attr("src")
+            ));
+            if (!source.isEmpty()) {
+                inlineImages.add(new Post.InlineImage(source, label));
+            }
+        }
+        return inlineImages;
+    }
+
+    private static String removeInlineHtmlImages(String html) {
+        if (html == null || !html.toLowerCase().contains("<img")) {
+            return html == null ? "" : html;
+        }
+        Document document = Jsoup.parseBodyFragment(html);
+        for (Element image : document.select("img")) {
+            if (inlineImageLabel(image).isEmpty()) {
+                continue;
+            }
+            image.remove();
+        }
+        return document.body().html();
+    }
+
+    private static String normalizeNgaInlineImageUrl(String rawUrl) {
+        if (rawUrl == null) {
+            return "";
+        }
+        String value = rawUrl.trim();
+        if (value.isEmpty() || value.startsWith("data:")) {
+            return "";
+        }
+        int bracket = value.indexOf('[');
+        if (bracket >= 0) {
+            value = value.substring(0, bracket).trim();
+        }
+        if (value.startsWith("https://") || value.startsWith("http://")) {
+            return value;
+        }
+        if (value.startsWith("//")) {
+            return value.contains("img.nga.178.com/attachments/")
+                    ? "http:" + value
+                    : "https:" + value;
+        }
+        if (value.startsWith("./")) {
+            value = value.substring(2);
+        }
+        if (value.startsWith("/smiley/") || value.startsWith("smiley/")) {
+            return value.startsWith("/")
+                    ? "https://bbs.nga.cn" + value
+                    : "https://bbs.nga.cn/" + value;
+        }
+        if (value.startsWith("/")) {
+            return "http://img.nga.178.com" + value;
+        }
+        if (value.startsWith("attachments/") || value.startsWith("ngabbs/")) {
+            return "http://img.nga.178.com/" + value;
+        }
+        if (value.startsWith("mon_")) {
+            return "http://img.nga.178.com/attachments/" + value;
+        }
+        return "";
+    }
+
+    private static String timeTextFromFields(JSONObject item, String label, String... keys) {
+        for (String key : keys) {
+            String raw = stringValue(item, key);
+            if (raw.isEmpty()) {
+                continue;
+            }
+            Long epochSeconds = epochSeconds(raw);
+            if (epochSeconds != null && epochSeconds > 0L) {
+                return label + " " + POST_TIME_FORMATTER.format(Instant.ofEpochSecond(epochSeconds));
+            }
+            String text = cleanApiContent(raw);
+            if (text.isEmpty()
+                    || "0".equals(text)
+                    || "null".equalsIgnoreCase(text)
+                    || "false".equalsIgnoreCase(text)) {
+                continue;
+            }
+            return text.startsWith(label) ? text : label + " " + text;
+        }
+        return "";
+    }
+
+    private static Long epochSeconds(String raw) {
+        String value = raw == null ? "" : raw.trim();
+        if (!value.matches("\\d{9,13}")) {
+            return null;
+        }
+        try {
+            long numeric = Long.parseLong(value);
+            if (numeric > 100_000_000_000L) {
+                numeric /= 1000L;
+            }
+            return numeric;
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private static String abbreviate(String text, int maxLength) {
+        String value = cleanApiContent(text);
+        if (value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, maxLength).trim() + "...";
     }
 
     private static void collectImageUrlsFromText(String text, List<String> urls, Set<String> seen) {
@@ -668,6 +862,8 @@ public final class NgaConnector implements ForumConnector {
 
     static String cleanApiContent(String content) {
         String value = content == null ? "" : content;
+        value = QUOTE_BLOCK.matcher(value).replaceAll(" ");
+        value = PID_REPLY.matcher(value).replaceAll(" ");
         value = BBCODE_IMAGE.matcher(value).replaceAll(" ");
         value = replaceHtmlImageLabels(value);
         value = value.replace("[br]", "\n")
@@ -738,5 +934,24 @@ public final class NgaConnector implements ForumConnector {
             }
         }
         return "";
+    }
+
+    static final class ParsedApiContent {
+        final String text;
+        final String replyContext;
+        final List<String> imageUrls;
+        final List<Post.InlineImage> inlineImages;
+
+        ParsedApiContent(
+                String text,
+                String replyContext,
+                List<String> imageUrls,
+                List<Post.InlineImage> inlineImages
+        ) {
+            this.text = text;
+            this.replyContext = replyContext;
+            this.imageUrls = imageUrls;
+            this.inlineImages = inlineImages;
+        }
     }
 }

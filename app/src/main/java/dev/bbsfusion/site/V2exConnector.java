@@ -132,8 +132,10 @@ public final class V2exConnector implements ForumConnector {
                         memberName(member, "楼主"),
                         memberAvatar(member),
                         postMeta(topic),
+                        content.replyContext,
                         content.text,
-                        content.imageUrls
+                        content.imageUrls,
+                        content.inlineImages
                 ));
             }
         }
@@ -155,8 +157,10 @@ public final class V2exConnector implements ForumConnector {
                     memberName(member, "楼层 " + (posts.size() + 1)),
                     memberAvatar(member),
                     postMeta(reply),
+                    content.replyContext,
                     content.text,
-                    content.imageUrls
+                    content.imageUrls,
+                    content.inlineImages
             ));
         }
 
@@ -221,10 +225,18 @@ public final class V2exConnector implements ForumConnector {
     static ParsedContent parsedContent(String rendered, String fallback) {
         String html = rendered == null || rendered.trim().isEmpty() ? fallback : rendered;
         Document document = Jsoup.parse(html == null ? "" : html, HOME_URL);
+        String replyContext = extractReplyContext(document);
+        document.select("blockquote").remove();
         List<String> imageUrls = new ArrayList<>();
+        List<Post.InlineImage> inlineImages = new ArrayList<>();
         for (Element image : document.select("img[src]")) {
             if (isInlineEmoji(image)) {
-                image.replaceWith(new TextNode(" " + inlineEmojiLabel(image) + " "));
+                String label = inlineEmojiLabel(image);
+                String src = normalizeUrl(image.attr("src"));
+                if (!src.isEmpty()) {
+                    inlineImages.add(new Post.InlineImage(src, label));
+                }
+                image.replaceWith(new TextNode(" " + label + " "));
                 continue;
             }
             String src = normalizeUrl(image.attr("src"));
@@ -237,7 +249,26 @@ public final class V2exConnector implements ForumConnector {
         if (text.isEmpty() && fallback != null) {
             text = fallback.replace('\u00a0', ' ').replaceAll("\\s+", " ").trim();
         }
-        return new ParsedContent(text, imageUrls);
+        return new ParsedContent(text, replyContext, imageUrls, inlineImages);
+    }
+
+    private static String extractReplyContext(Document document) {
+        Element quote = document.selectFirst("blockquote");
+        if (quote == null) {
+            return "";
+        }
+        String text = quote.text().replace('\u00a0', ' ').replaceAll("\\s+", " ").trim();
+        if (text.isEmpty()) {
+            return "";
+        }
+        return "引用：" + abbreviate(text, 120);
+    }
+
+    private static String abbreviate(String text, int maxLength) {
+        if (text.length() <= maxLength) {
+            return text;
+        }
+        return text.substring(0, maxLength).trim() + "...";
     }
 
     private static boolean isInlineEmoji(Element image) {
@@ -343,11 +374,20 @@ public final class V2exConnector implements ForumConnector {
 
     static final class ParsedContent {
         final String text;
+        final String replyContext;
         final List<String> imageUrls;
+        final List<Post.InlineImage> inlineImages;
 
-        ParsedContent(String text, List<String> imageUrls) {
+        ParsedContent(
+                String text,
+                String replyContext,
+                List<String> imageUrls,
+                List<Post.InlineImage> inlineImages
+        ) {
             this.text = text;
+            this.replyContext = replyContext;
             this.imageUrls = imageUrls;
+            this.inlineImages = inlineImages;
         }
     }
 }

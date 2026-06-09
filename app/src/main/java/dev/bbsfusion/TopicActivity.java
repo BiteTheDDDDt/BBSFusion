@@ -5,9 +5,13 @@ import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.drawable.BitmapDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Spannable;
+import android.text.SpannableStringBuilder;
+import android.text.style.ImageSpan;
 import android.webkit.CookieManager;
 import android.view.Gravity;
 import android.view.View;
@@ -180,8 +184,25 @@ public final class TopicActivity extends Activity {
             textColumn.addView(metaView);
         }
 
+        if (!post.replyContext.isEmpty()) {
+            TextView replyView = new TextView(this);
+            replyView.setText(post.replyContext);
+            replyView.setTextColor(Color.rgb(83, 83, 83));
+            replyView.setTextSize(13);
+            replyView.setLineSpacing(0, 1.1f);
+            replyView.setTextIsSelectable(true);
+            replyView.setBackgroundColor(Color.rgb(238, 237, 232));
+            replyView.setPadding(dp(8), dp(6), dp(8), dp(6));
+            LinearLayout.LayoutParams replyParams = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+            );
+            replyParams.bottomMargin = dp(8);
+            textColumn.addView(replyView, replyParams);
+        }
+
         TextView contentView = new TextView(this);
-        contentView.setText(post.content);
+        contentView.setText(spannablePostContent(post, contentView));
         contentView.setTextColor(Color.rgb(32, 33, 36));
         contentView.setTextSize(16);
         contentView.setLineSpacing(0, 1.15f);
@@ -228,6 +249,64 @@ public final class TopicActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT
         ));
         return frame;
+    }
+
+    private CharSequence spannablePostContent(Post post, TextView contentView) {
+        SpannableStringBuilder builder = new SpannableStringBuilder(post.content);
+        int searchStart = 0;
+        for (Post.InlineImage inlineImage : post.inlineImages) {
+            if (!isHttpUrl(inlineImage.sourceUrl) || inlineImage.label.isEmpty()) {
+                continue;
+            }
+            int start = builder.toString().indexOf(inlineImage.label, searchStart);
+            if (start < 0) {
+                continue;
+            }
+            int end = start + inlineImage.label.length();
+            searchStart = end;
+            loadInlineImage(contentView, builder, inlineImage.sourceUrl, start, end);
+        }
+        return builder;
+    }
+
+    private void loadInlineImage(
+            TextView textView,
+            SpannableStringBuilder builder,
+            String imageUrl,
+            int start,
+            int end
+    ) {
+        imageExecutor.execute(() -> {
+            Bitmap bitmap = fetchRemoteImage(imageUrl);
+            if (bitmap == null) {
+                return;
+            }
+            mainHandler.post(() -> {
+                BitmapDrawable drawable = new BitmapDrawable(getResources(), scaledInlineBitmap(bitmap));
+                drawable.setBounds(0, 0, drawable.getBitmap().getWidth(), drawable.getBitmap().getHeight());
+                builder.setSpan(
+                        new ImageSpan(drawable, ImageSpan.ALIGN_BOTTOM),
+                        start,
+                        end,
+                        Spannable.SPAN_EXCLUSIVE_EXCLUSIVE
+                );
+                textView.setText(builder);
+                textView.setTextIsSelectable(true);
+            });
+        });
+    }
+
+    private Bitmap scaledInlineBitmap(Bitmap bitmap) {
+        int height = dp(22);
+        if (bitmap.getWidth() <= 0 || bitmap.getHeight() <= 0) {
+            return bitmap;
+        }
+        int width = Math.max(1, Math.round(height * (bitmap.getWidth() / (float) bitmap.getHeight())));
+        width = Math.min(dp(96), width);
+        if (bitmap.getWidth() == width && bitmap.getHeight() == height) {
+            return bitmap;
+        }
+        return Bitmap.createScaledBitmap(bitmap, width, height, true);
     }
 
     private int defaultAvatarResource(String avatarUrl) {
@@ -346,6 +425,8 @@ public final class TopicActivity extends Activity {
         appendCookie(builder, cookieManager.getCookie("https://stage1st.com/2b/"));
         appendCookie(builder, cookieManager.getCookie("https://bbs.nga.cn/"));
         appendCookie(builder, cookieManager.getCookie("https://ngabbs.com/"));
+        appendCookie(builder, cookieManager.getCookie("https://www.v2ex.com/"));
+        appendCookie(builder, cookieManager.getCookie("https://linux.do/"));
         return builder.toString();
     }
 

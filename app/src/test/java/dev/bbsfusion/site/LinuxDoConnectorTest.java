@@ -79,6 +79,7 @@ public final class LinuxDoConnectorTest {
                         + "\"avatar_template\":\"/user_avatar/linux.do/alice/{size}/1_2.png\","
                         + "\"created_at\":\"2026-06-08T07:10:00.000Z\","
                         + "\"updated_at\":\"2026-06-08T08:10:00.000Z\","
+                        + "\"reply_to_post_number\":2,"
                         + "\"cooked\":\"<p>正文</p><p><img src=\\\"/uploads/default/original/1/sample.png\\\"></p>\""
                         + "}]}"
                         + "}"
@@ -91,6 +92,7 @@ public final class LinuxDoConnectorTest {
         assertEquals("alice", post.author);
         assertEquals("https://linux.do/user_avatar/linux.do/alice/96/1_2.png", post.avatarUrl);
         assertEquals("发表于 2026-6-8 15:10 · 编辑 2026-6-8 16:10", post.meta);
+        assertEquals("回复 #2", post.replyContext);
         assertEquals("正文", post.content);
         assertEquals("https://linux.do/uploads/default/original/1/sample.png", post.imageUrls.get(0));
     }
@@ -127,5 +129,17 @@ public final class LinuxDoConnectorTest {
 
         assertEquals("正文 :smile: 后续", content.text);
         assertEquals(0, content.imageUrls.size());
+        assertEquals(1, content.inlineImages.size());
+        assertEquals("https://linux.do/images/emoji/twitter/smile.png", content.inlineImages.get(0).sourceUrl);
+    }
+
+    @Test
+    public void separatesQuoteFromCookedHtml() {
+        LinuxDoConnector.ParsedContent content = LinuxDoConnector.parsedCooked(
+                "<aside class=\"quote\"><blockquote>引用内容</blockquote></aside><p>回复正文</p>"
+        );
+
+        assertEquals("引用：引用内容", content.replyContext);
+        assertEquals("回复正文", content.text);
     }
 }

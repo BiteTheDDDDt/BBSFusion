@@ -8,8 +8,10 @@ public final class Post {
     public final String author;
     public final String avatarUrl;
     public final String meta;
+    public final String replyContext;
     public final String content;
     public final List<String> imageUrls;
+    public final List<InlineImage> inlineImages;
 
     public Post(String author, String content) {
         this(author, "", content);
@@ -24,14 +26,42 @@ public final class Post {
     }
 
     public Post(String author, String avatarUrl, String meta, String content, List<String> imageUrls) {
+        this(author, avatarUrl, meta, "", content, imageUrls, Collections.emptyList());
+    }
+
+    public Post(
+            String author,
+            String avatarUrl,
+            String meta,
+            String replyContext,
+            String content,
+            List<String> imageUrls,
+            List<InlineImage> inlineImages
+    ) {
         this.author = author;
         this.avatarUrl = avatarUrl == null ? "" : avatarUrl;
         this.meta = meta == null ? "" : meta.trim();
-        this.content = content;
+        this.replyContext = replyContext == null ? "" : replyContext.trim();
+        this.content = content == null ? "" : content;
         if (imageUrls == null || imageUrls.isEmpty()) {
             this.imageUrls = Collections.emptyList();
         } else {
             this.imageUrls = Collections.unmodifiableList(new ArrayList<>(imageUrls));
+        }
+        if (inlineImages == null || inlineImages.isEmpty()) {
+            this.inlineImages = Collections.emptyList();
+        } else {
+            this.inlineImages = Collections.unmodifiableList(new ArrayList<>(inlineImages));
+        }
+    }
+
+    public static final class InlineImage {
+        public final String sourceUrl;
+        public final String label;
+
+        public InlineImage(String sourceUrl, String label) {
+            this.sourceUrl = sourceUrl == null ? "" : sourceUrl.trim();
+            this.label = label == null ? "" : label.trim();
         }
     }
 }

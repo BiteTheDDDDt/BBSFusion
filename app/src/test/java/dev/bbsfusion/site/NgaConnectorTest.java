@@ -57,9 +57,36 @@ public final class NgaConnectorTest {
     }
 
     @Test
+    public void extractsPostTimeMetadataFromStringFields() throws Exception {
+        JSONObject item = new JSONObject(
+                "{"
+                        + "\"postDate\":\"2026-6-8 17:50\","
+                        + "\"lastModify\":\"2026-6-8 18:50\""
+                        + "}"
+        );
+
+        String meta = NgaConnector.postMetaFromApiPost(item);
+
+        assertEquals("发表于 2026-6-8 17:50 · 编辑 2026-6-8 18:50", meta);
+    }
+
+    @Test
     public void keepsHtmlEmoticonLabelsInApiContent() {
         String content = "正文<img src=\"/smiley/ac/lol.png\" alt=\"[笑]\">后续";
 
         assertEquals("正文 [笑] 后续", NgaConnector.cleanApiContent(content));
+        NgaConnector.ParsedApiContent parsed = NgaConnector.parseApiContent(new JSONObject(), content);
+        assertEquals(1, parsed.inlineImages.size());
+        assertEquals("https://bbs.nga.cn/smiley/ac/lol.png", parsed.inlineImages.get(0).sourceUrl);
+    }
+
+    @Test
+    public void separatesQuoteFromApiContent() {
+        String content = "[quote]alice 发表于 2026-6-8 17:50 原文[/quote]回复正文";
+
+        NgaConnector.ParsedApiContent parsed = NgaConnector.parseApiContent(new JSONObject(), content);
+
+        assertEquals("引用：alice 发表于 2026-6-8 17:50 原文", parsed.replyContext);
+        assertEquals("回复正文", parsed.text);
     }
 }

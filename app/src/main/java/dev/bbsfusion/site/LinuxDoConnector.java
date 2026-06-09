@@ -278,6 +278,11 @@ public final class LinuxDoConnector implements ForumConnector {
             if (content.text.isEmpty() && content.imageUrls.isEmpty()) {
                 continue;
             }
+            String replyContext = content.replyContext;
+            int replyTo = item.optInt("reply_to_post_number", 0);
+            if (replyContext.isEmpty() && replyTo > 0) {
+                replyContext = "回复 #" + replyTo;
+            }
             posts.add(new Post(
                     firstNonEmpty(
                             item.optString("display_username", ""),
@@ -287,8 +292,10 @@ public final class LinuxDoConnector implements ForumConnector {
                     ),
                     discourseAvatar(item.optString("avatar_template", "")),
                     postMeta(item),
+                    replyContext,
                     content.text,
-                    content.imageUrls
+                    content.imageUrls,
+                    content.inlineImages
             ));
         }
         return new TopicDetail(title.isEmpty() ? "帖子详情" : title, url, posts);
@@ -315,7 +322,15 @@ public final class LinuxDoConnector implements ForumConnector {
             if (avatarElement != null) {
                 avatar = absoluteLinuxDoUrl(avatarElement.attr("src"));
             }
-            posts.add(new Post(author, avatar, postMetaFromHtml(container), content.text, content.imageUrls));
+            posts.add(new Post(
+                    author,
+                    avatar,
+                    postMetaFromHtml(container),
+                    content.replyContext,
+                    content.text,
+                    content.imageUrls,
+                    content.inlineImages
+            ));
             if (posts.size() >= 80) {
                 break;
             }
@@ -442,10 +457,18 @@ public final class LinuxDoConnector implements ForumConnector {
 
     static ParsedContent parsedCooked(String html) {
         Document document = Jsoup.parse(html == null ? "" : html, BASE_URL + "/");
+        String replyContext = extractReplyContext(document);
+        document.select("aside.quote, blockquote").remove();
         List<String> imageUrls = new ArrayList<>();
+        List<Post.InlineImage> inlineImages = new ArrayList<>();
         for (Element image : document.select("img[src]")) {
             if (isInlineEmoji(image)) {
-                image.replaceWith(new TextNode(" " + inlineEmojiLabel(image) + " "));
+                String label = inlineEmojiLabel(image);
+                String src = absoluteLinuxDoUrl(image.attr("src"));
+                if (!src.isEmpty()) {
+                    inlineImages.add(new Post.InlineImage(src, label));
+                }
+                image.replaceWith(new TextNode(" " + label + " "));
                 continue;
             }
             String src = absoluteLinuxDoUrl(image.attr("src"));
@@ -455,7 +478,27 @@ public final class LinuxDoConnector implements ForumConnector {
             image.remove();
         }
         String text = clean(document.text());
-        return new ParsedContent(text, imageUrls);
+        return new ParsedContent(text, replyContext, imageUrls, inlineImages);
+    }
+
+    private static String extractReplyContext(Document document) {
+        Element quote = document.selectFirst("aside.quote blockquote, aside.quote, blockquote");
+        if (quote == null) {
+            return "";
+        }
+        String text = clean(quote.text());
+        if (text.isEmpty()) {
+            return "";
+        }
+        return "引用：" + abbreviate(text, 120);
+    }
+
+    private static String abbreviate(String text, int maxLength) {
+        String value = clean(text);
+        if (value.length() <= maxLength) {
+            return value;
+        }
+        return value.substring(0, maxLength).trim() + "...";
     }
 
     private static boolean isInlineEmoji(Element image) {
@@ -574,11 +617,20 @@ public final class LinuxDoConnector implements ForumConnector {
 
     static final class ParsedContent {
         final String text;
+        final String replyContext;
         final List<String> imageUrls;
+        final List<Post.InlineImage> inlineImages;
 
-        ParsedContent(String text, List<String> imageUrls) {
+        ParsedContent(
+                String text,
+                String replyContext,
+                List<String> imageUrls,
+                List<Post.InlineImage> inlineImages
+        ) {
             this.text = text;
+            this.replyContext = replyContext;
             this.imageUrls = imageUrls;
+            this.inlineImages = inlineImages;
         }
     }
 }

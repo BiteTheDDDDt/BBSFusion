@@ -7,6 +7,7 @@ import dev.bbsfusion.core.TopicSummary;
 
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
+import org.jsoup.nodes.Node;
 import org.jsoup.nodes.TextNode;
 import org.jsoup.select.Elements;
 
@@ -133,11 +134,12 @@ public final class ForumHtmlParsers {
                 }
             }
             long sortTimeMillis = parseTimeMillis(lastPostTime);
+            String repliesText = extractS1ReplyCount(row);
             topics.add(new TopicSummary(
                     siteId,
                     title,
                     absoluteUrl,
-                    metaWithTime(sourceLabel, lastPostTime),
+                    metaWithTimeAndReplies(sourceLabel, lastPostTime, repliesText),
                     sortTimeMillis
             ));
             if (topics.size() >= 80) {
@@ -148,16 +150,33 @@ public final class ForumHtmlParsers {
         return topics;
     }
 
+    private static String extractS1ReplyCount(Element row) {
+        Element replyElement = row.selectFirst("td.num a, .num a");
+        if (replyElement == null) {
+            replyElement = row.selectFirst("td.num, .num");
+        }
+        if (replyElement == null) {
+            return "";
+        }
+        String text = clean(replyElement.text());
+        Matcher matcher = Pattern.compile("\\d+").matcher(text);
+        return matcher.find() ? matcher.group() : "";
+    }
+
     public static TopicDetail extractTopic(Document document, String url) {
+        return extractTopic(document, url, 1);
+    }
+
+    public static TopicDetail extractTopic(Document document, String url, int pageNumber) {
         String title = extractTitle(document);
         List<Post> posts = extractPosts(document);
         if (posts.isEmpty()) {
-            String body = clean(document.body() == null ? "" : document.body().text());
+            String body = cleanMultiline(document.body() == null ? "" : postTextWithLineBreaks(document.body()));
             if (!body.isEmpty()) {
                 posts.add(new Post("页面正文", body));
             }
         }
-        return new TopicDetail(title, url, posts);
+        return new TopicDetail(title, url, posts, pageNumber, hasNextPage(document, pageNumber));
     }
 
     public static List<BoardDefinition> extractBoards(
@@ -384,31 +403,35 @@ public final class ForumHtmlParsers {
     }
 
     private static String extractPostTime(Element container) {
-        Element timeElement = firstElement(container, new String[]{
+        String[] selectors = {
                 "time[datetime]",
+                "em[id^=authorposton]",
+                "[id^=authorposton]",
                 ".authi em",
                 ".pti .authi em",
                 ".pi .authi em",
                 ".authi span[title]",
                 ".posttime",
                 ".time"
-        });
-        if (timeElement != null) {
-            String datetime = clean(timeElement.attr("datetime"));
-            if (!datetime.isEmpty()) {
-                return "发表于 " + datetime.replace('T', ' ').replaceAll("\\.\\d+Z?$", "");
-            }
-            String title = clean(timeElement.attr("title"));
-            if (!title.isEmpty()) {
-                return "发表于 " + title;
-            }
-            String text = cleanPostTimeLabel(timeElement.text());
-            if (!text.isEmpty()) {
-                return text;
+        };
+        for (String selector : selectors) {
+            for (Element timeElement : container.select(selector)) {
+                String datetime = clean(timeElement.attr("datetime"));
+                if (!datetime.isEmpty()) {
+                    return "发表于 " + datetime.replace('T', ' ').replaceAll("\\.\\d+Z?$", "");
+                }
+                String title = clean(timeElement.attr("title"));
+                if (!title.isEmpty() && !extractLastTimeText(title).isEmpty()) {
+                    return "发表于 " + title;
+                }
+                String text = cleanPostTimeLabel(timeElement.text());
+                if (!text.isEmpty()) {
+                    return text;
+                }
             }
         }
 
-        String time = extractLastTimeText(clean(container.select(".authi, .pti, .pi").text()));
+        String time = extractLastTimeText(clean(container.select(".authi, .pti, .pi, [id^=authorposton]").text()));
         if (time.isEmpty()) {
             return "";
         }
@@ -467,7 +490,7 @@ public final class ForumHtmlParsers {
                 image.replaceWith(new TextNode(" " + label + " "));
             }
         }
-        return new ParsedPostContent(clean(copy.text()), replyContext, inlineImages);
+        return new ParsedPostContent(cleanMultiline(postTextWithLineBreaks(copy)), replyContext, inlineImages);
     }
 
     private static String extractReplyContext(Element contentElement) {
@@ -559,6 +582,68 @@ public final class ForumHtmlParsers {
         return clean(label);
     }
 
+    private static String postTextWithLineBreaks(Element root) {
+        StringBuilder builder = new StringBuilder();
+        appendPostText(root, builder, true);
+        return builder.toString();
+    }
+
+    private static void appendPostText(Node node, StringBuilder builder, boolean isRoot) {
+        if (node instanceof TextNode) {
+            builder.append(((TextNode) node).getWholeText());
+            return;
+        }
+        if (!(node instanceof Element)) {
+            return;
+        }
+
+        Element element = (Element) node;
+        String tag = element.normalName();
+        if ("br".equals(tag)) {
+            appendLineBreak(builder);
+            return;
+        }
+
+        boolean block = !isRoot && isPostBlockTag(tag);
+        if (block) {
+            appendLineBreak(builder);
+        }
+        for (Node child : element.childNodes()) {
+            appendPostText(child, builder, false);
+        }
+        if (block) {
+            appendLineBreak(builder);
+        }
+    }
+
+    private static boolean isPostBlockTag(String tag) {
+        return "p".equals(tag)
+                || "div".equals(tag)
+                || "section".equals(tag)
+                || "article".equals(tag)
+                || "blockquote".equals(tag)
+                || "ul".equals(tag)
+                || "ol".equals(tag)
+                || "li".equals(tag)
+                || "table".equals(tag)
+                || "thead".equals(tag)
+                || "tbody".equals(tag)
+                || "tfoot".equals(tag)
+                || "tr".equals(tag)
+                || "td".equals(tag)
+                || "th".equals(tag)
+                || "pre".equals(tag)
+                || tag.matches("h[1-6]");
+    }
+
+    private static void appendLineBreak(StringBuilder builder) {
+        int length = builder.length();
+        if (length == 0 || builder.charAt(length - 1) == '\n') {
+            return;
+        }
+        builder.append('\n');
+    }
+
     private static Element firstElement(Element root, String[] selectors) {
         for (String selector : selectors) {
             Element element = root.selectFirst(selector);
@@ -594,6 +679,19 @@ public final class ForumHtmlParsers {
 
         String title = clean(document.title());
         return title.isEmpty() ? "帖子详情" : title;
+    }
+
+    private static boolean hasNextPage(Document document, int pageNumber) {
+        for (Element anchor : document.select("a[href]")) {
+            String text = clean(anchor.text());
+            if ("下一页".equals(text) || "下页".equals(text) || "Next".equalsIgnoreCase(text)) {
+                return true;
+            }
+            if (String.valueOf(pageNumber + 1).equals(text)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean isTopicUrl(String siteId, String rawHref, String absoluteUrl) {
@@ -807,6 +905,15 @@ public final class ForumHtmlParsers {
         return sourceLabel + " · " + time;
     }
 
+    private static String metaWithTimeAndReplies(String sourceLabel, String timeText, String repliesText) {
+        String meta = metaWithTime(sourceLabel, timeText);
+        String replies = clean(repliesText);
+        if (replies.isEmpty()) {
+            return meta;
+        }
+        return meta + " · " + replies + " 回复";
+    }
+
     private static boolean isNavigationText(String text) {
         String value = text.trim();
         return "上一页".equals(value)
@@ -833,6 +940,19 @@ public final class ForumHtmlParsers {
                 .trim();
     }
 
+    private static String cleanMultiline(String text) {
+        if (text == null) {
+            return "";
+        }
+        return text.replace('\u00a0', ' ')
+                .replace("\r\n", "\n")
+                .replace('\r', '\n')
+                .replaceAll("[ \\t\\x0B\\f]+", " ")
+                .replaceAll("[ \\t]*\\n[ \\t]*", "\n")
+                .replaceAll("\\n{2,}", "\n")
+                .trim();
+    }
+
     private static String firstNonEmpty(String... values) {
         for (String value : values) {
             if (value != null && !value.trim().isEmpty()) {
@@ -849,13 +969,14 @@ public final class ForumHtmlParsers {
         }
         value = value.replaceFirst("^发表于\\s*", "发表于 ");
         if (value.startsWith("发表于 ")) {
-            return value;
+            String time = extractLastTimeText(value);
+            return time.isEmpty() ? "" : "发表于 " + time;
         }
         String time = extractLastTimeText(value);
         if (!time.isEmpty()) {
             return "发表于 " + time;
         }
-        return value.length() > 40 ? "" : value;
+        return "";
     }
 
     private static final class ParsedPostContent {

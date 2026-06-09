@@ -40,6 +40,23 @@ public final class FeedOrderingTest {
         assertEquals("current-2", ordered.get(3).title);
     }
 
+    @Test
+    public void interleavesUntimedTopicsBySiteAfterTimedTopics() {
+        List<TopicSummary> ordered = FeedOrdering.order(Arrays.asList(
+                topic("nga", "nga-1", 0L),
+                topic("nga", "nga-2", 0L),
+                topic("s1", "s1-1", 0L),
+                topic("s1", "s1-2", 0L),
+                topic("nga", "timed", 100L)
+        ));
+
+        assertEquals("timed", ordered.get(0).title);
+        assertEquals("nga-1", ordered.get(1).title);
+        assertEquals("s1-1", ordered.get(2).title);
+        assertEquals("nga-2", ordered.get(3).title);
+        assertEquals("s1-2", ordered.get(4).title);
+    }
+
     private static TopicSummary topic(String siteId, String title, long sortTimeMillis) {
         return new TopicSummary(siteId, title, "https://example.test/" + title, siteId, sortTimeMillis);
     }

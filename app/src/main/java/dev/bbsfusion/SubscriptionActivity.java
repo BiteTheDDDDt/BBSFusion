@@ -123,7 +123,7 @@ public final class SubscriptionActivity extends Activity {
         newGroup.setOnClickListener(v -> createGroup());
         Button deleteGroup = makeButton("删除组");
         deleteGroup.setOnClickListener(v -> deleteGroup());
-        Button setCurrent = makeButton("设为当前");
+        Button setCurrent = makeButton("设为默认");
         setCurrent.setOnClickListener(v -> saveCurrentGroup(true, true));
 
         groupActions.addView(newGroup, new LinearLayout.LayoutParams(0, dp(44), 1));
@@ -177,7 +177,6 @@ public final class SubscriptionActivity extends Activity {
                 }
                 saveCurrentGroup(false, false);
                 selectedGroupIndex = position;
-                SubscriptionStore.setSelectedGroupId(SubscriptionActivity.this, selectedGroup().id);
                 renderGroupEditor();
             }
 
@@ -199,8 +198,11 @@ public final class SubscriptionActivity extends Activity {
         groupName.setText(group.name);
         mergeVisibleBoards(group.boards);
         renderBoardChecks();
-        status.setText("当前组包含 " + group.boards.size()
-                + " 个板块；可选 " + visibleBoards.size() + " 个。已设为当前，勾选后保存。");
+        String currentLabel = group.id.equals(SubscriptionStore.selectedGroupId(this))
+                ? "已设为默认"
+                : "尚未设为默认";
+        status.setText(group.name + " 包含 " + group.boards.size()
+                + " 个板块；可选 " + visibleBoards.size() + " 个。" + currentLabel + "，勾选后保存。");
     }
 
     private void renderBoardChecks() {
@@ -281,7 +283,11 @@ public final class SubscriptionActivity extends Activity {
         if (refreshSpinner) {
             renderGroupSpinner();
         }
-        status.setText(updated.name + " 已保存：" + selectedBoards.size() + " 个板块。");
+        if (makeCurrent) {
+            status.setText(updated.name + " 已设为默认并保存：" + selectedBoards.size() + " 个板块。");
+        } else {
+            status.setText(updated.name + " 已保存：" + selectedBoards.size() + " 个板块。");
+        }
     }
 
     private List<BoardDefinition> selectedBoards() {

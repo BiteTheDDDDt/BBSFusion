@@ -1,6 +1,7 @@
 package dev.bbsfusion;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -15,6 +16,7 @@ import android.text.style.ImageSpan;
 import android.webkit.CookieManager;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -27,6 +29,8 @@ import dev.bbsfusion.core.ForumConnector;
 import dev.bbsfusion.core.Post;
 import dev.bbsfusion.core.TopicDetail;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -37,6 +41,8 @@ public final class TopicActivity extends Activity {
     public static final String EXTRA_SITE_ID = "site_id";
     public static final String EXTRA_TITLE = "title";
     public static final String EXTRA_URL = "url";
+    private static final int MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+    private static final int MAX_BITMAP_SIDE = 2048;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final ExecutorService imageExecutor = Executors.newFixedThreadPool(4);
@@ -45,10 +51,14 @@ public final class TopicActivity extends Activity {
     private LinearLayout postsContainer;
     private TextView titleView;
     private TextView statusView;
+    private Button loadMoreButton;
 
     private ForumConnector connector;
     private String topicUrl;
     private String initialTitle;
+    private int loadedPage = 1;
+    private boolean isLoadingPage;
+    private boolean hasMorePages;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -117,17 +127,45 @@ public final class TopicActivity extends Activity {
                 1
         ));
 
+        loadMoreButton = makeButton("加载更多");
+        loadMoreButton.setVisibility(View.GONE);
+        loadMoreButton.setOnClickListener(v -> loadTopicPage(loadedPage + 1, true));
+        root.addView(loadMoreButton, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(44)
+        ));
+
         return root;
     }
 
     private void loadTopic() {
+        loadedPage = 1;
+        hasMorePages = false;
+        loadTopicPage(1, false);
+    }
+
+    private void loadTopicPage(int page, boolean append) {
+        if (isLoadingPage) {
+            return;
+        }
+        isLoadingPage = true;
+        updateLoadMoreButton();
         statusView.setText("正在加载 " + connector.name() + " 帖子...");
         executor.execute(() -> {
             try {
-                TopicDetail detail = connector.fetchTopic(topicUrl);
-                mainHandler.post(() -> renderTopic(detail));
+                TopicDetail detail = connector.fetchTopicPage(topicUrl, page);
+                mainHandler.post(() -> {
+                    isLoadingPage = false;
+                    if (append) {
+                        appendTopic(detail);
+                    } else {
+                        renderTopic(detail);
+                    }
+                });
             } catch (Exception error) {
                 mainHandler.post(() -> {
+                    isLoadingPage = false;
+                    updateLoadMoreButton();
                     statusView.setText("加载失败：" + error.getMessage());
                     addPostText("提示", "可以点“原站”用 WebView 打开。");
                 });
@@ -141,7 +179,29 @@ public final class TopicActivity extends Activity {
         for (Post post : detail.posts) {
             addPostView(post);
         }
+        loadedPage = detail.pageNumber;
+        hasMorePages = detail.hasMore;
+        updateLoadMoreButton();
         statusView.setText("已加载 " + detail.posts.size() + " 段内容。");
+    }
+
+    private void appendTopic(TopicDetail detail) {
+        for (Post post : detail.posts) {
+            addPostView(post);
+        }
+        loadedPage = detail.pageNumber;
+        hasMorePages = detail.hasMore && !detail.posts.isEmpty();
+        updateLoadMoreButton();
+        statusView.setText("已加载到第 " + loadedPage + " 页，新增 " + detail.posts.size() + " 段内容。");
+    }
+
+    private void updateLoadMoreButton() {
+        if (loadMoreButton == null) {
+            return;
+        }
+        loadMoreButton.setVisibility(hasMorePages || isLoadingPage ? View.VISIBLE : View.GONE);
+        loadMoreButton.setEnabled(hasMorePages && !isLoadingPage);
+        loadMoreButton.setText(isLoadingPage ? "正在加载..." : "加载更多");
     }
 
     private void addPostText(String author, String content) {
@@ -175,21 +235,14 @@ public final class TopicActivity extends Activity {
         authorView.setPadding(0, 0, 0, dp(2));
         textColumn.addView(authorView);
 
-        if (!post.meta.isEmpty()) {
-            TextView metaView = new TextView(this);
-            metaView.setText(post.meta);
-            metaView.setTextColor(Color.rgb(117, 117, 117));
-            metaView.setTextSize(12);
-            metaView.setPadding(0, 0, 0, dp(6));
-            textColumn.addView(metaView);
-        }
+        addMetaViews(textColumn, post);
 
         if (!post.replyContext.isEmpty()) {
             TextView replyView = new TextView(this);
             replyView.setText(post.replyContext);
             replyView.setTextColor(Color.rgb(83, 83, 83));
             replyView.setTextSize(13);
-            replyView.setLineSpacing(0, 1.1f);
+            replyView.setLineSpacing(0, 1.05f);
             replyView.setTextIsSelectable(true);
             replyView.setBackgroundColor(Color.rgb(238, 237, 232));
             replyView.setPadding(dp(8), dp(6), dp(8), dp(6));
@@ -205,7 +258,7 @@ public final class TopicActivity extends Activity {
         contentView.setText(spannablePostContent(post, contentView));
         contentView.setTextColor(Color.rgb(32, 33, 36));
         contentView.setTextSize(16);
-        contentView.setLineSpacing(0, 1.15f);
+        contentView.setLineSpacing(0, 1.05f);
         contentView.setTextIsSelectable(true);
         textColumn.addView(contentView);
 
@@ -221,6 +274,7 @@ public final class TopicActivity extends Activity {
             imageParams.topMargin = dp(8);
             textColumn.addView(postImageView, imageParams);
             loadRemoteImage(postImageView, imageUrl, contentImageWidth(), dp(420), true);
+            postImageView.setOnClickListener(v -> showImagePreview(imageUrl));
         }
 
         row.addView(textColumn, new LinearLayout.LayoutParams(
@@ -251,6 +305,67 @@ public final class TopicActivity extends Activity {
         return frame;
     }
 
+    private void addMetaViews(LinearLayout textColumn, Post post) {
+        boolean added = false;
+        if (!post.postedMeta.isEmpty()) {
+            addMetaView(textColumn, post.postedMeta);
+            added = true;
+        }
+        if (!post.editedMeta.isEmpty()) {
+            addMetaView(textColumn, post.editedMeta);
+            added = true;
+        }
+        if (!added && !post.meta.isEmpty()) {
+            addMetaView(textColumn, post.meta);
+        }
+    }
+
+    private void addMetaView(LinearLayout textColumn, String text) {
+        TextView metaView = new TextView(this);
+        metaView.setText(text);
+        metaView.setTextColor(Color.rgb(117, 117, 117));
+        metaView.setTextSize(12);
+        metaView.setPadding(0, 0, 0, dp(4));
+        textColumn.addView(metaView);
+    }
+
+    private void showImagePreview(String imageUrl) {
+        ImageView imageView = makeRemoteImageView();
+        imageView.setBackgroundColor(Color.BLACK);
+        imageView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        imageView.setPadding(dp(8), dp(8), dp(8), dp(8));
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int screenHeight = getResources().getDisplayMetrics().heightPixels;
+        FrameLayout frame = new FrameLayout(this);
+        frame.setBackgroundColor(Color.BLACK);
+        frame.addView(imageView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                Math.max(dp(240), screenHeight - dp(180))
+        ));
+        TextView loadingView = new TextView(this);
+        loadingView.setText("正在加载图片...");
+        loadingView.setTextColor(Color.WHITE);
+        loadingView.setTextSize(14);
+        loadingView.setGravity(Gravity.CENTER);
+        frame.addView(loadingView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                Math.max(dp(240), screenHeight - dp(180))
+        ));
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setView(frame)
+                .setPositiveButton("关闭", null)
+                .create();
+        dialog.setOnShowListener(d -> loadRemoteImage(
+                imageView,
+                imageUrl,
+                Math.max(dp(240), screenWidth - dp(48)),
+                Math.max(dp(240), screenHeight - dp(180)),
+                false,
+                loadingView
+        ));
+        dialog.show();
+    }
+
     private CharSequence spannablePostContent(Post post, TextView contentView) {
         SpannableStringBuilder builder = new SpannableStringBuilder(post.content);
         int searchStart = 0;
@@ -277,7 +392,7 @@ public final class TopicActivity extends Activity {
             int end
     ) {
         imageExecutor.execute(() -> {
-            Bitmap bitmap = fetchRemoteImage(imageUrl);
+            Bitmap bitmap = fetchRemoteImage(imageUrl, dp(96), dp(96));
             if (bitmap == null) {
                 return;
             }
@@ -343,10 +458,22 @@ public final class TopicActivity extends Activity {
             int maxHeight,
             boolean resizeToBitmap
     ) {
+        loadRemoteImage(imageView, imageUrl, targetWidth, maxHeight, resizeToBitmap, null);
+    }
+
+    private void loadRemoteImage(
+            ImageView imageView,
+            String imageUrl,
+            int targetWidth,
+            int maxHeight,
+            boolean resizeToBitmap,
+            TextView stateView
+    ) {
         imageView.setTag(imageUrl);
         imageExecutor.execute(() -> {
-            Bitmap bitmap = fetchRemoteImage(imageUrl);
+            Bitmap bitmap = fetchRemoteImage(imageUrl, targetWidth, maxHeight);
             if (bitmap == null) {
+                mainHandler.post(() -> updateImageLoadState(imageView, imageUrl, stateView, false));
                 return;
             }
             mainHandler.post(() -> {
@@ -358,11 +485,33 @@ public final class TopicActivity extends Activity {
                     resizeImageView(imageView, bitmap, targetWidth, maxHeight);
                 }
                 imageView.setImageBitmap(bitmap);
+                updateImageLoadState(imageView, imageUrl, stateView, true);
             });
         });
     }
 
-    private Bitmap fetchRemoteImage(String imageUrl) {
+    private void updateImageLoadState(
+            ImageView imageView,
+            String imageUrl,
+            TextView stateView,
+            boolean loaded
+    ) {
+        if (stateView == null) {
+            return;
+        }
+        Object tag = imageView.getTag();
+        if (!(tag instanceof String) || !imageUrl.equals(tag)) {
+            return;
+        }
+        if (loaded) {
+            stateView.setVisibility(View.GONE);
+        } else {
+            stateView.setText("图片加载失败，可点原站查看。");
+            stateView.setVisibility(View.VISIBLE);
+        }
+    }
+
+    private Bitmap fetchRemoteImage(String imageUrl, int targetWidth, int targetHeight) {
         HttpURLConnection connection = null;
         try {
             URL url = new URL(imageUrl);
@@ -384,7 +533,11 @@ public final class TopicActivity extends Activity {
                 connection.setRequestProperty("Cookie", cookie);
             }
             try (InputStream input = connection.getInputStream()) {
-                return BitmapFactory.decodeStream(input);
+                byte[] data = readImageBytes(input);
+                if (data == null || data.length == 0) {
+                    return null;
+                }
+                return decodeSampledBitmap(data, targetWidth, targetHeight);
             }
         } catch (Exception ignored) {
             return null;
@@ -393,6 +546,63 @@ public final class TopicActivity extends Activity {
                 connection.disconnect();
             }
         }
+    }
+
+    private byte[] readImageBytes(InputStream input) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        byte[] buffer = new byte[16 * 1024];
+        int total = 0;
+        int read;
+        while ((read = input.read(buffer)) != -1) {
+            total += read;
+            if (total > MAX_IMAGE_BYTES) {
+                return null;
+            }
+            output.write(buffer, 0, read);
+        }
+        return output.toByteArray();
+    }
+
+    private Bitmap decodeSampledBitmap(byte[] data, int targetWidth, int targetHeight) {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(data, 0, data.length, bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            try {
+                return BitmapFactory.decodeByteArray(data, 0, data.length);
+            } catch (OutOfMemoryError ignored) {
+                return null;
+            }
+        }
+
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inSampleSize = sampleSize(
+                bounds.outWidth,
+                bounds.outHeight,
+                targetWidth,
+                targetHeight
+        );
+        try {
+            return BitmapFactory.decodeByteArray(data, 0, data.length, options);
+        } catch (OutOfMemoryError ignored) {
+            return null;
+        }
+    }
+
+    private int sampleSize(int width, int height, int targetWidth, int targetHeight) {
+        int requestedWidth = targetWidth > 0 ? targetWidth : MAX_BITMAP_SIDE;
+        int requestedHeight = targetHeight > 0 ? targetHeight : MAX_BITMAP_SIDE;
+        requestedWidth = Math.min(Math.max(1, requestedWidth), MAX_BITMAP_SIDE);
+        requestedHeight = Math.min(Math.max(1, requestedHeight), MAX_BITMAP_SIDE);
+
+        int sample = 1;
+        while (width / sample > requestedWidth * 2
+                || height / sample > requestedHeight * 2
+                || width / sample > MAX_BITMAP_SIDE
+                || height / sample > MAX_BITMAP_SIDE) {
+            sample *= 2;
+        }
+        return Math.max(1, sample);
     }
 
     private void resizeImageView(ImageView imageView, Bitmap bitmap, int targetWidth, int maxHeight) {
@@ -408,8 +618,22 @@ public final class TopicActivity extends Activity {
         if (availableWidth > 0) {
             targetWidth = availableWidth;
         }
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(targetWidth, height);
-        params.topMargin = dp(8);
+        ViewGroup.LayoutParams existing = imageView.getLayoutParams();
+        ViewGroup.LayoutParams params;
+        if (existing instanceof LinearLayout.LayoutParams) {
+            LinearLayout.LayoutParams linearParams = (LinearLayout.LayoutParams) existing;
+            linearParams.width = targetWidth;
+            linearParams.height = height;
+            linearParams.topMargin = dp(8);
+            params = linearParams;
+        } else if (existing instanceof FrameLayout.LayoutParams) {
+            FrameLayout.LayoutParams frameParams = (FrameLayout.LayoutParams) existing;
+            frameParams.width = targetWidth;
+            frameParams.height = height;
+            params = frameParams;
+        } else {
+            params = new ViewGroup.LayoutParams(targetWidth, height);
+        }
         imageView.setLayoutParams(params);
     }
 

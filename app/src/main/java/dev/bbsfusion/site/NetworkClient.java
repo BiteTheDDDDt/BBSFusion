@@ -5,11 +5,13 @@ import android.webkit.CookieManager;
 import org.jsoup.Connection;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
+import org.jsoup.parser.Parser;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.IOException;
+import java.net.URI;
 import java.util.Locale;
 import java.util.Map;
 
@@ -23,6 +25,11 @@ final class NetworkClient {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                     + "(KHTML, like Gecko) Chrome/126.0 Safari/537.36 BBSFusion/0.1";
     private static final String NGA_APP_USER_AGENT = "NGA_skull/6.0.5(iPhone10,3;iOS 12.0.1)";
+
+    static {
+        System.setProperty("java.net.preferIPv4Stack", "true");
+        System.setProperty("java.net.preferIPv6Addresses", "false");
+    }
 
     private NetworkClient() {
     }
@@ -51,6 +58,11 @@ final class NetworkClient {
         } catch (JSONException error) {
             throw new IOException("JSON 返回无法解析。", error);
         }
+    }
+
+    static Document getXml(String url, String referrer) throws IOException {
+        String body = getBody(url, referrer, true, "application/rss+xml,application/xml,text/xml,*/*");
+        return Jsoup.parse(body, url, Parser.xmlParser());
     }
 
     static JSONObject postNgaApi(String actionUrl, Map<String, String> formData) throws IOException {
@@ -141,7 +153,12 @@ final class NetworkClient {
             appendCookieHeader(connection, cookieManager, referrer);
         }
 
-        Connection.Response response = connection.execute();
+        Connection.Response response;
+        try {
+            response = connection.execute();
+        } catch (IOException error) {
+            throw annotateConnectionError(url, error);
+        }
         saveCookies(cookieManager, response);
         if (response.statusCode() >= 400) {
             throw new IOException("站点返回 HTTP " + response.statusCode() + "。可尝试原站登录或换网络环境。");
@@ -173,6 +190,33 @@ final class NetworkClient {
             cookieManager.setCookie(responseUrl, cookie.getKey() + "=" + cookie.getValue());
         }
         cookieManager.flush();
+    }
+
+    private static IOException annotateConnectionError(String url, IOException error) {
+        String host = hostFromUrl(url).toLowerCase(Locale.ROOT);
+        String message = error.getMessage() == null ? "" : error.getMessage();
+        String normalized = message.toLowerCase(Locale.ROOT);
+        boolean likelyNetworkProblem = normalized.contains("failed to connect")
+                || normalized.contains("unable to resolve host")
+                || normalized.contains("no address associated")
+                || normalized.contains("timed out")
+                || normalized.contains("connection refused");
+        if ((host.endsWith("v2ex.com") || host.endsWith("linux.do")) && likelyNetworkProblem) {
+            String site = host.endsWith("v2ex.com") ? "V2EX" : "Linux.do";
+            return new IOException(site + " 连接失败：当前网络、DNS 或代理可能没有生效。"
+                    + "如果是在模拟器里测试，请给模拟器配置系统代理或确保 TUN 接管模拟器。"
+                    + "原始错误：" + concise(message), error);
+        }
+        return error;
+    }
+
+    private static String hostFromUrl(String url) {
+        try {
+            String host = URI.create(url).getHost();
+            return host == null ? "" : host;
+        } catch (IllegalArgumentException ignored) {
+            return "";
+        }
     }
 
     private static void throwIfAccessBlocked(Document document) throws IOException {

@@ -11,12 +11,16 @@ import org.jsoup.nodes.Document;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class S1Connector implements ForumConnector {
     private static final String HOME_URL =
             "https://stage1st.com/2b/forum-157-1.html";
     private static final String LOGIN_URL =
             "https://stage1st.com/2b/member.php?mod=logging&action=login&mobile=2";
+    private static final Pattern THREAD_PAGE_URL =
+            Pattern.compile("(thread-\\d+-)\\d+(-\\d+\\.html)");
 
     @Override
     public String id() {
@@ -74,7 +78,29 @@ public final class S1Connector implements ForumConnector {
 
     @Override
     public TopicDetail fetchTopic(String url) throws IOException {
-        Document document = NetworkClient.get(url, HOME_URL);
-        return ForumHtmlParsers.extractTopic(document, url);
+        return fetchTopicPage(url, 1);
+    }
+
+    @Override
+    public TopicDetail fetchTopicPage(String url, int page) throws IOException {
+        String pageUrl = pagedTopicUrl(url, page);
+        Document document = NetworkClient.get(pageUrl, HOME_URL);
+        return ForumHtmlParsers.extractTopic(document, pageUrl, page);
+    }
+
+    private static String pagedTopicUrl(String url, int page) {
+        if (page <= 1 || url == null || url.isEmpty()) {
+            return url;
+        }
+        Matcher matcher = THREAD_PAGE_URL.matcher(url);
+        if (matcher.find()) {
+            return matcher.replaceFirst(Matcher.quoteReplacement(
+                    matcher.group(1) + page + matcher.group(2)
+            ));
+        }
+        if (url.contains("page=")) {
+            return url.replaceFirst("([?&]page=)\\d+", "$1" + page);
+        }
+        return url + (url.contains("?") ? "&" : "?") + "page=" + page;
     }
 }

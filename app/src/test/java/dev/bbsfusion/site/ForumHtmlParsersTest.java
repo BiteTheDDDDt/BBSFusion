@@ -38,6 +38,28 @@ public final class ForumHtmlParsersTest {
     }
 
     @Test
+    public void extractsS1DesktopReplyCount() {
+        Document document = Jsoup.parse(
+                "<table><tbody id=\"normalthread_123\"><tr>" +
+                        "<th><a class=\"xst\" href=\"thread-123-1-1.html\">一个桌面版帖子</a></th>" +
+                        "<td class=\"num\"><a>42</a><em>1000</em></td>" +
+                        "<td class=\"by\"><em><a>2026-6-8 17:50</a></em></td>" +
+                        "</tr></tbody></table>",
+                "https://stage1st.com/2b/"
+        );
+
+        List<TopicSummary> topics = ForumHtmlParsers.extractTopics(
+                document,
+                "s1",
+                "https://stage1st.com/2b/forum-157-1.html",
+                "S1"
+        );
+
+        assertEquals(1, topics.size());
+        assertEquals("S1 · 2026-6-8 17:50 · 42 回复", topics.get(0).meta);
+    }
+
+    @Test
     public void extractsNgaTopicLinks() {
         Document document = Jsoup.parse(
                 "<a href=\"read.php?tid=456\">NGA 测试帖子</a>" +
@@ -83,7 +105,27 @@ public final class ForumHtmlParsersTest {
         assertEquals(1, detail.posts.size());
         assertEquals("alice", detail.posts.get(0).author);
         assertEquals("发表于 2026-6-8 17:50", detail.posts.get(0).meta);
+        assertEquals("发表于 2026-6-8 17:50", detail.posts.get(0).postedMeta);
         assertEquals("这是一段足够长的帖子正文内容。", detail.posts.get(0).content);
+    }
+
+    @Test
+    public void ignoresNonTimeDiscuzAuthorActionsWhenExtractingPostTime() {
+        Document document = Jsoup.parse(
+                "<div id=\"post_1\"><table id=\"pid1\"><tr>" +
+                        "<td><div class=\"authi\"><em>只看该作者</em><em id=\"authorposton1\">发表于 2026-6-8 17:50</em></div>" +
+                        "<div class=\"pstatus\">本帖最后由 alice 于 2026-6-8 18:10 编辑</div>" +
+                        "<td class=\"t_f\" id=\"postmessage_1\">这是一段足够长的帖子正文内容。</td></td>" +
+                        "</tr></table></div>",
+                "https://stage1st.com/2b/"
+        );
+
+        TopicDetail detail = ForumHtmlParsers.extractTopic(document, "https://stage1st.com/2b/thread-1-1-1.html");
+        Post post = detail.posts.get(0);
+
+        assertEquals("发表于 2026-6-8 17:50 · 编辑 2026-6-8 18:10", post.meta);
+        assertEquals("发表于 2026-6-8 17:50", post.postedMeta);
+        assertEquals("编辑 2026-6-8 18:10", post.editedMeta);
     }
 
     @Test
@@ -132,6 +174,39 @@ public final class ForumHtmlParsersTest {
                 "https://stage1st.com/2b/static/image/smiley/default/lol.gif",
                 detail.posts.get(0).inlineImages.get(0).sourceUrl
         );
+    }
+
+    @Test
+    public void preservesDiscuzPostLineBreaks() {
+        Document document = Jsoup.parse(
+                "<div id=\"post_1\"><table id=\"pid1\"><tr><td>" +
+                        "<div class=\"authi\"><a class=\"xw1\">alice</a></div>" +
+                        "<td class=\"t_f\" id=\"postmessage_1\">" +
+                        "第一行<br/>第二行<div>第三段</div><p>第四段" +
+                        "<img src=\"static/image/smiley/default/lol.gif\" alt=\"[笑]\" />" +
+                        "</p></td></td></tr></table></div>",
+                "https://stage1st.com/2b/"
+        );
+
+        TopicDetail detail = ForumHtmlParsers.extractTopic(document, "https://stage1st.com/2b/thread-1-1-1.html");
+
+        assertEquals("第一行\n第二行\n第三段\n第四段 [笑]", detail.posts.get(0).content);
+    }
+
+    @Test
+    public void collapsesDiscuzExtraBlankLines() {
+        Document document = Jsoup.parse(
+                "<div class=\"postrow\">" +
+                        "<span class=\"poster\">alice</span>" +
+                        "<div class=\"postcontent\">" +
+                        "第一行<br/><br/>第二行<div><p>第三段内容足够长</p></div>" +
+                        "</div></div>",
+                "https://stage1st.com/2b/"
+        );
+
+        TopicDetail detail = ForumHtmlParsers.extractTopic(document, "https://stage1st.com/2b/thread-1-1-1.html");
+
+        assertEquals("第一行\n第二行\n第三段内容足够长", detail.posts.get(0).content);
     }
 
     @Test

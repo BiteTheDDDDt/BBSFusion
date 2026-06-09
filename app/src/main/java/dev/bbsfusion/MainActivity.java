@@ -11,6 +11,7 @@ import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
@@ -45,7 +46,9 @@ public final class MainActivity extends Activity {
     private SubscriptionGroup selectedGroup;
     private TopicAdapter adapter;
     private TextView status;
-    private final Button[] shortcutButtons = new Button[3];
+    private final List<Button> shortcutButtons = new ArrayList<>();
+    private HorizontalScrollView shortcutScroll;
+    private LinearLayout shortcutContainer;
     private Button configButton;
     private Button loginButton;
     private Button refreshButton;
@@ -96,19 +99,22 @@ public final class MainActivity extends Activity {
         status.setPadding(dp(16), 0, dp(16), dp(12));
         root.addView(status);
 
-        LinearLayout targets = new LinearLayout(this);
-        targets.setOrientation(LinearLayout.HORIZONTAL);
-        targets.setPadding(dp(12), 0, dp(12), dp(8));
-        targets.setGravity(Gravity.CENTER_VERTICAL);
-
-        for (int i = 0; i < shortcutButtons.length; i++) {
-            final int index = i;
-            shortcutButtons[i] = makeButton(shortcutLabel(i));
-            shortcutButtons[i].setTag(shortcutGroupId(i));
-            shortcutButtons[i].setOnClickListener(v -> selectShortcutGroup(index, true));
-            targets.addView(shortcutButtons[i], new LinearLayout.LayoutParams(0, dp(44), 1));
-        }
-        root.addView(targets);
+        shortcutScroll = new HorizontalScrollView(this);
+        shortcutScroll.setHorizontalScrollBarEnabled(false);
+        shortcutScroll.setFillViewport(false);
+        shortcutContainer = new LinearLayout(this);
+        shortcutContainer.setOrientation(LinearLayout.HORIZONTAL);
+        shortcutContainer.setPadding(dp(12), 0, dp(6), dp(8));
+        shortcutContainer.setGravity(Gravity.CENTER_VERTICAL);
+        shortcutScroll.addView(shortcutContainer, new HorizontalScrollView.LayoutParams(
+                HorizontalScrollView.LayoutParams.WRAP_CONTENT,
+                dp(52)
+        ));
+        root.addView(shortcutScroll, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                dp(52)
+        ));
+        updateShortcutButtonLabels();
 
         LinearLayout actions = new LinearLayout(this);
         actions.setOrientation(LinearLayout.HORIZONTAL);
@@ -171,6 +177,7 @@ public final class MainActivity extends Activity {
         }
         adapter.notifyDataSetChanged();
         updateButtonState();
+        scrollSelectedShortcutIntoView();
 
         if (cached != null) {
             status.setText(targetName() + " 已选择，显示上次加载的 " + cached.size() + " 个帖子。");
@@ -333,9 +340,6 @@ public final class MainActivity extends Activity {
 
     private void updateButtonState() {
         for (Button button : shortcutButtons) {
-            if (button == null) {
-                continue;
-            }
             Object tag = button.getTag();
             boolean selected = selectedGroup != null && selectedGroup.id.equals(tag);
             paintButton(button, selected);
@@ -357,6 +361,9 @@ public final class MainActivity extends Activity {
     }
 
     private void paintButton(Button button, boolean selected) {
+        if (button == null) {
+            return;
+        }
         if (selected) {
             button.setTextColor(Color.WHITE);
             button.setBackgroundColor(Color.rgb(37, 108, 90));
@@ -373,57 +380,81 @@ public final class MainActivity extends Activity {
 
     private void reloadShortcutGroups() {
         shortcutGroups.clear();
-        shortcutGroups.addAll(SubscriptionStore.shortcutGroups(this));
-        if (shortcutGroups.isEmpty()) {
-            selectedGroup = null;
-            return;
-        }
-
-        String selectedId = SubscriptionStore.selectedGroupId(this);
-        SubscriptionGroup nextSelected = null;
-        for (SubscriptionGroup group : shortcutGroups) {
-            if (group.id.equals(selectedId)) {
-                nextSelected = group;
-                break;
-            }
-        }
-        if (nextSelected == null) {
-            nextSelected = shortcutGroups.get(0);
-            SubscriptionStore.setSelectedGroupId(this, nextSelected.id);
-        }
-        selectedGroup = nextSelected;
+        shortcutGroups.addAll(SubscriptionStore.displayGroups(this));
+        selectedGroup = SubscriptionStore.selectedGroup(this);
     }
 
     private void updateShortcutButtonLabels() {
-        for (int i = 0; i < shortcutButtons.length; i++) {
-            Button button = shortcutButtons[i];
-            if (button == null) {
-                continue;
-            }
-            button.setText(shortcutLabel(i));
-            button.setTag(shortcutGroupId(i));
-        }
-    }
-
-    private void selectShortcutGroup(int index, boolean autoRefresh) {
-        if (index < 0 || index >= shortcutGroups.size()) {
-            status.setText("这个位置还没有订阅组，请先进入板块配置。");
+        if (shortcutContainer == null) {
             return;
         }
-        selectGroup(shortcutGroups.get(index), autoRefresh);
+        shortcutContainer.removeAllViews();
+        shortcutButtons.clear();
+        for (SubscriptionGroup group : shortcutGroups) {
+            Button button = makeGroupButton(group.name);
+            button.setTag(group.id);
+            button.setOnClickListener(v -> {
+                SubscriptionGroup selected = groupById((String) v.getTag());
+                if (selected == null) {
+                    status.setText("这个订阅组不存在，请先进入板块配置。");
+                    return;
+                }
+                selectGroup(selected, true);
+            });
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT,
+                    dp(44)
+            );
+            params.rightMargin = dp(6);
+            shortcutContainer.addView(button, params);
+            shortcutButtons.add(button);
+        }
+        updateButtonState();
+        scrollSelectedShortcutIntoView();
     }
 
-    private String shortcutLabel(int index) {
-        if (index >= 0 && index < shortcutGroups.size()) {
-            return shortcutGroups.get(index).name;
-        }
-        return "订阅组 " + (index + 1);
+    private Button makeGroupButton(String label) {
+        Button button = makeButton(label);
+        button.setMinWidth(dp(92));
+        button.setMaxWidth(dp(180));
+        return button;
     }
 
-    private String shortcutGroupId(int index) {
-        if (index >= 0 && index < shortcutGroups.size()) {
-            return shortcutGroups.get(index).id;
+    private void scrollSelectedShortcutIntoView() {
+        if (shortcutScroll == null || selectedGroup == null) {
+            return;
         }
-        return "";
+        for (Button button : shortcutButtons) {
+            Object tag = button.getTag();
+            if (selectedGroup.id.equals(tag)) {
+                shortcutScroll.post(() -> scrollShortcutButtonIntoView(button));
+                return;
+            }
+        }
+    }
+
+    private void scrollShortcutButtonIntoView(Button button) {
+        if (shortcutScroll == null || button.getWidth() <= 0) {
+            return;
+        }
+        int visibleLeft = shortcutScroll.getScrollX();
+        int visibleRight = visibleLeft + shortcutScroll.getWidth();
+        int margin = dp(12);
+        int buttonLeft = button.getLeft();
+        int buttonRight = button.getRight();
+        if (buttonLeft < visibleLeft + margin) {
+            shortcutScroll.smoothScrollTo(Math.max(0, buttonLeft - margin), 0);
+        } else if (buttonRight > visibleRight - margin) {
+            shortcutScroll.smoothScrollTo(Math.max(0, buttonRight - shortcutScroll.getWidth() + margin), 0);
+        }
+    }
+
+    private SubscriptionGroup groupById(String groupId) {
+        for (SubscriptionGroup group : shortcutGroups) {
+            if (group.id.equals(groupId)) {
+                return group;
+            }
+        }
+        return null;
     }
 }

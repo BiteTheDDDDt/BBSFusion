@@ -26,12 +26,13 @@ import java.util.regex.Pattern;
 
 public final class V2exConnector implements ForumConnector {
     private static final String HOME_URL = "https://www.v2ex.com/";
+    private static final String API_BASE_URL = "https://v2ex.com";
     private static final String LOGIN_URL = "https://www.v2ex.com/signin";
-    private static final String LATEST_API = "https://www.v2ex.com/api/topics/latest.json";
-    private static final String NODE_TOPICS_API = "https://www.v2ex.com/api/topics/show.json?node_name=";
-    private static final String TOPIC_API = "https://www.v2ex.com/api/topics/show.json?id=";
-    private static final String REPLIES_API = "https://www.v2ex.com/api/replies/show.json?topic_id=";
-    private static final String NODES_API = "https://www.v2ex.com/api/nodes/all.json";
+    private static final String LATEST_API = API_BASE_URL + "/api/topics/latest.json";
+    private static final String NODE_TOPICS_API = API_BASE_URL + "/api/topics/show.json?node_name=";
+    private static final String TOPIC_API = API_BASE_URL + "/api/topics/show.json?id=";
+    private static final String REPLIES_API = API_BASE_URL + "/api/replies/show.json?topic_id=";
+    private static final String NODES_API = API_BASE_URL + "/api/nodes/all.json";
     private static final Pattern TOPIC_ID = Pattern.compile("(?:/t/|[?&]id=)(\\d+)");
     private static final DateTimeFormatter TIME_FORMATTER =
             DateTimeFormatter.ofPattern("M-d HH:mm").withZone(ZoneId.of("Asia/Shanghai"));
@@ -245,9 +246,9 @@ public final class V2exConnector implements ForumConnector {
             }
             image.remove();
         }
-        String text = document.text().replace('\u00a0', ' ').replaceAll("\\s+", " ").trim();
+        String text = HtmlText.textWithLineBreaks(document.body());
         if (text.isEmpty() && fallback != null) {
-            text = fallback.replace('\u00a0', ' ').replaceAll("\\s+", " ").trim();
+            text = HtmlText.cleanInline(fallback);
         }
         return new ParsedContent(text, replyContext, imageUrls, inlineImages);
     }
@@ -257,7 +258,7 @@ public final class V2exConnector implements ForumConnector {
         if (quote == null) {
             return "";
         }
-        String text = quote.text().replace('\u00a0', ' ').replaceAll("\\s+", " ").trim();
+        String text = HtmlText.cleanInline(quote.text());
         if (text.isEmpty()) {
             return "";
         }

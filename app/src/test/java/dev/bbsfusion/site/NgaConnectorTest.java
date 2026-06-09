@@ -82,13 +82,13 @@ public final class NgaConnectorTest {
 
     @Test
     public void rendersNamedUbbEmoticonsAsInlineImages() {
-        String content = "正文[s:ng:doge]中间[s:ac:哭笑]后续";
+        String content = "正文[s:ng:doge]中间[s:ac:哭笑]后续[s:pg:响指]";
 
         NgaConnector.ParsedApiContent parsed = NgaConnector.parseApiContent(new JSONObject(), content);
 
-        assertEquals("正文 [s:ng:doge] 中间 [s:ac:哭笑] 后续", parsed.text);
+        assertEquals("正文 [s:ng:doge] 中间 [s:ac:哭笑] 后续 [s:pg:响指]", parsed.text);
         assertEquals(0, parsed.imageUrls.size());
-        assertEquals(2, parsed.inlineImages.size());
+        assertEquals(3, parsed.inlineImages.size());
         assertEquals(
                 "https://img4.nga.178.com/ngabbs/post/smile/ng_11.png",
                 parsed.inlineImages.get(0).sourceUrl
@@ -96,6 +96,10 @@ public final class NgaConnectorTest {
         assertEquals(
                 "https://img4.nga.178.com/ngabbs/post/smile/ac15.png",
                 parsed.inlineImages.get(1).sourceUrl
+        );
+        assertEquals(
+                "https://img4.nga.178.com/ngabbs/post/smile/pg14.png",
+                parsed.inlineImages.get(2).sourceUrl
         );
     }
 
@@ -115,6 +119,24 @@ public final class NgaConnectorTest {
     }
 
     @Test
+    public void preservesApiContentLineBreaks() {
+        String content = "第一行[br]第二行<br />第三行<div>第四段</div><p>第五段</p>";
+
+        NgaConnector.ParsedApiContent parsed = NgaConnector.parseApiContent(new JSONObject(), content);
+
+        assertEquals("第一行\n第二行\n第三行\n第四段\n第五段", parsed.text);
+    }
+
+    @Test
+    public void collapsesApiContentExtraBlankLines() {
+        String content = "第一行[br][br]第二行<div><p>第三段</p></div>";
+
+        NgaConnector.ParsedApiContent parsed = NgaConnector.parseApiContent(new JSONObject(), content);
+
+        assertEquals("第一行\n第二行\n第三段", parsed.text);
+    }
+
+    @Test
     public void separatesQuoteFromApiContent() {
         String content = "[quote]alice 发表于 2026-6-8 17:50 原文[/quote]回复正文";
 
@@ -122,5 +144,25 @@ public final class NgaConnectorTest {
 
         assertEquals("引用：alice 发表于 2026-6-8 17:50 原文", parsed.replyContext);
         assertEquals("回复正文", parsed.text);
+    }
+
+    @Test
+    public void cleansCommonBbcodeAndHtmlEntitiesFromApiContent() {
+        String content = "&gt; [url=https://example.test]链接文本[/url] [/url] "
+                + "[b]Post by [uid=123]alice[/uid] (2026-6-8 17:50):[/b] 正文";
+
+        NgaConnector.ParsedApiContent parsed = NgaConnector.parseApiContent(new JSONObject(), content);
+
+        assertEquals("链接文本 正文", parsed.text);
+    }
+
+    @Test
+    public void removesReplyToHeadersFromApiContent() {
+        String content = "&gt; Reply to Post by [uid=123]alice[/uid] (2026-6-8 17:50): "
+                + "[url=https://example.test]引用来源[/url]<br/><br/>正文内容";
+
+        NgaConnector.ParsedApiContent parsed = NgaConnector.parseApiContent(new JSONObject(), content);
+
+        assertEquals("正文内容", parsed.text);
     }
 }

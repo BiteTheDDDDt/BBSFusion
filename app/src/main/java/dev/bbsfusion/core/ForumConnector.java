@@ -19,4 +19,11 @@ public interface ForumConnector {
     List<BoardDefinition> fetchAvailableBoards() throws IOException;
 
     TopicDetail fetchTopic(String url) throws IOException;
+
+    default TopicDetail fetchTopicPage(String url, int page) throws IOException {
+        if (page <= 1) {
+            return fetchTopic(url);
+        }
+        return new TopicDetail("帖子详情", url, java.util.Collections.emptyList(), page, false);
+    }
 }

@@ -82,14 +82,12 @@ public final class SubscriptionStore {
         return new SubscriptionGroup(DEFAULT_GROUP_ID, "综合", BoardCatalog.defaultGroupBoards());
     }
 
-    public static List<SubscriptionGroup> shortcutGroups(Context context) {
-        List<SubscriptionGroup> groups = loadGroups(context);
-        List<SubscriptionGroup> shortcuts = new ArrayList<>();
-        int max = Math.min(3, groups.size());
-        for (int i = 0; i < max; i++) {
-            shortcuts.add(groups.get(i));
-        }
-        return shortcuts;
+    public static List<SubscriptionGroup> displayGroups(Context context) {
+        return displayGroups(loadGroups(context));
+    }
+
+    static List<SubscriptionGroup> displayGroups(List<SubscriptionGroup> groups) {
+        return new ArrayList<>(groups);
     }
 
     private static List<SubscriptionGroup> defaultGroups() {

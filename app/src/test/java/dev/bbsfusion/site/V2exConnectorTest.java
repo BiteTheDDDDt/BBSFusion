@@ -50,9 +50,19 @@ public final class V2exConnectorTest {
                 ""
         );
 
-        assertEquals("第一行 第二行", content.text);
+        assertEquals("第一行\n第二行", content.text);
         assertEquals(1, content.imageUrls.size());
         assertEquals("https://cdn.v2ex.com/a.png", content.imageUrls.get(0));
+    }
+
+    @Test
+    public void preservesRenderedParagraphBreaks() {
+        V2exConnector.ParsedContent content = V2exConnector.parsedContent(
+                "<p>第一段</p><p>第二段<br>第三行</p>",
+                ""
+        );
+
+        assertEquals("第一段\n第二段\n第三行", content.text);
     }
 
     @Test

@@ -17,6 +17,7 @@ import org.jsoup.nodes.TextNode;
 import java.io.IOException;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -33,6 +34,7 @@ public final class LinuxDoConnector implements ForumConnector {
             "https://linux.do/categories.json?include_subcategories=true";
     private static final Pattern CATEGORY_ID = Pattern.compile("^c:([^:]+):(\\d+)$");
     private static final Pattern TOPIC_ID = Pattern.compile("/t/(?:[^/]+/)?(\\d+)");
+    private static final Pattern RSS_POST_COUNT = Pattern.compile("(\\d+)\\s*个帖子");
     private static final DateTimeFormatter TIME_FORMATTER =
             DateTimeFormatter.ofPattern("M-d HH:mm").withZone(ZoneId.of("Asia/Shanghai"));
     private static final DateTimeFormatter POST_TIME_FORMATTER =
@@ -76,6 +78,18 @@ public final class LinuxDoConnector implements ForumConnector {
             }
         } catch (IOException error) {
             jsonError = error;
+        }
+
+        try {
+            List<TopicSummary> topics = parseTopicsFromRss(
+                    NetworkClient.getXml(rssUrlForBoard(board), board.referrer),
+                    board
+            );
+            if (!topics.isEmpty()) {
+                return topics;
+            }
+        } catch (IOException ignored) {
+            // Fall through to crawler HTML below.
         }
 
         try {
@@ -201,6 +215,39 @@ public final class LinuxDoConnector implements ForumConnector {
                     meta,
                     sortTimeMillis
             ));
+        }
+        return topics;
+    }
+
+    static List<TopicSummary> parseTopicsFromRss(Document document, BoardDefinition board) {
+        List<TopicSummary> topics = new ArrayList<>();
+        for (Element item : document.select("item")) {
+            String title = clean(firstText(item, "title"));
+            String url = clean(firstText(item, "link"));
+            if (title.length() < 2 || url.isEmpty()) {
+                continue;
+            }
+
+            long sortTimeMillis = parseRssDateMillis(firstText(item, "pubDate"));
+            String label = board.sourceLabel;
+            String category = clean(firstText(item, "category"));
+            if ("latest".equals(board.boardId) && !category.isEmpty()) {
+                label = "Linux.do " + category;
+            }
+
+            String meta = label;
+            if (sortTimeMillis > 0L) {
+                meta += " · " + TIME_FORMATTER.format(Instant.ofEpochMilli(sortTimeMillis));
+            }
+            int replies = repliesFromRssDescription(firstText(item, "description"));
+            if (replies >= 0) {
+                meta += " · " + replies + " 回复";
+            }
+
+            topics.add(new TopicSummary("linuxdo", title, absoluteLinuxDoUrl(url), meta, sortTimeMillis));
+            if (topics.size() >= 80) {
+                break;
+            }
         }
         return topics;
     }
@@ -393,6 +440,18 @@ public final class LinuxDoConnector implements ForumConnector {
         return url + ".json";
     }
 
+    private static String rssUrlForBoard(BoardDefinition board) {
+        if ("latest".equals(board.boardId)) {
+            return BASE_URL + "/latest.rss";
+        }
+        Matcher matcher = CATEGORY_ID.matcher(board.boardId);
+        if (matcher.matches()) {
+            return BASE_URL + "/c/" + matcher.group(1) + "/" + matcher.group(2) + ".rss";
+        }
+        String url = board.url.endsWith("/") ? board.url.substring(0, board.url.length() - 1) : board.url;
+        return url + ".rss";
+    }
+
     private static void collectCategories(JSONArray categories, List<BoardDefinition> boards) {
         for (int i = 0; i < categories.length(); i++) {
             JSONObject category = categories.optJSONObject(i);
@@ -477,7 +536,7 @@ public final class LinuxDoConnector implements ForumConnector {
             }
             image.remove();
         }
-        String text = clean(document.text());
+        String text = HtmlText.textWithLineBreaks(document.body());
         return new ParsedContent(text, replyContext, imageUrls, inlineImages);
     }
 
@@ -538,6 +597,31 @@ public final class LinuxDoConnector implements ForumConnector {
             return Instant.parse(value.trim()).toEpochMilli();
         } catch (Exception ignored) {
             return 0L;
+        }
+    }
+
+    private static long parseRssDateMillis(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            return 0L;
+        }
+        try {
+            return ZonedDateTime.parse(value.trim(), DateTimeFormatter.RFC_1123_DATE_TIME)
+                    .toInstant()
+                    .toEpochMilli();
+        } catch (Exception ignored) {
+            return 0L;
+        }
+    }
+
+    private static int repliesFromRssDescription(String description) {
+        Matcher matcher = RSS_POST_COUNT.matcher(description == null ? "" : description);
+        if (!matcher.find()) {
+            return -1;
+        }
+        try {
+            return Math.max(0, Integer.parseInt(matcher.group(1)) - 1);
+        } catch (NumberFormatException ignored) {
+            return -1;
         }
     }
 

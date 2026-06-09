@@ -13,6 +13,7 @@ import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.nodes.TextNode;
+import org.jsoup.parser.Parser;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -62,6 +63,36 @@ public final class NgaConnector implements ForumConnector {
     private static final Pattern LEGACY_EMOTICON = Pattern.compile(
             "\\[s:(\\d+)]",
             Pattern.CASE_INSENSITIVE
+    );
+    private static final Pattern BBCODE_URL = Pattern.compile(
+            "\\[url(?:=[^\\]]*)?\\](.*?)\\[/url\\]",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL
+    );
+    private static final Pattern BBCODE_UID = Pattern.compile(
+            "\\[uid=\\d+](.*?)\\[/uid]",
+            Pattern.CASE_INSENSITIVE | Pattern.DOTALL
+    );
+    private static final Pattern BBCODE_SIMPLE_TAG = Pattern.compile(
+            "\\[/?(?:b|i|u|del|color|size|align|font|h|collapse)[^\\]]*]",
+            Pattern.CASE_INSENSITIVE
+    );
+    private static final Pattern REPLY_TO_HEADER = Pattern.compile(
+            "(?i)(?:^|[\\s>])Reply\\s+to\\s+(?:Post\\s+by\\s*)?.{1,160}?(?:\\([^)]*\\)\\s*[:：]|[:：])"
+    );
+    private static final Pattern LEADING_REPLY_QUOTE_BLOCK = Pattern.compile(
+            "(?is)^\\s*>?\\s*Reply\\s+to\\s+(?:Post\\s+by\\s*)?.{1,220}?(?:\\([^)]*\\)\\s*[:：]|[:：]).*?(?:\\r?\\n\\s*\\r?\\n)+"
+    );
+    private static final Pattern POST_BY_HEADER = Pattern.compile(
+            "(?i)(?:Reply to )?Post by .*?(?:\\([^)]*\\):|:)"
+    );
+    private static final Pattern API_BR = Pattern.compile("(?i)\\[(?:br|/br)]");
+    private static final Pattern HTML_LINE_BREAK = Pattern.compile("(?i)<br\\s*/?>");
+    private static final Pattern HTML_BLOCK_BOUNDARY = Pattern.compile(
+            "(?i)</?(?:p|div|section|article|blockquote|ul|ol|li|table|thead|tbody|tfoot|tr|td|th|h[1-6])\\b[^>]*>"
+    );
+    private static final Pattern HTML_ADJACENT_BLOCK_BOUNDARY = Pattern.compile(
+            "(?i)</(?:p|div|section|article|blockquote|ul|ol|li|table|thead|tbody|tfoot|tr|td|th|h[1-6])\\s*>\\s*"
+                    + "<(?:p|div|section|article|blockquote|ul|ol|li|table|thead|tbody|tfoot|tr|td|th|h[1-6])\\b[^>]*>"
     );
     private static final Pattern PLAIN_IMAGE_URL = Pattern.compile(
             "(?i)(?:(?:https?:)?//|attachments/|ngabbs/|\\./mon_|mon_)[^\\s\\]\\[\"'<>]+?\\.(?:jpg|jpeg|png|gif|webp)(?:\\?[^\\s\\]\\[\"'<>]*)?"
@@ -135,8 +166,13 @@ public final class NgaConnector implements ForumConnector {
 
     @Override
     public TopicDetail fetchTopic(String url) throws IOException {
+        return fetchTopicPage(url, 1);
+    }
+
+    @Override
+    public TopicDetail fetchTopicPage(String url, int page) throws IOException {
         try {
-            TopicDetail detail = fetchTopicFromApi(url);
+            TopicDetail detail = fetchTopicFromApi(url, page);
             if (!detail.posts.isEmpty()) {
                 return detail;
             }
@@ -144,7 +180,7 @@ public final class NgaConnector implements ForumConnector {
             // Fall back to the web page parser; some posts or sessions may not work with the app API.
         }
         Document document = NetworkClient.get(url, HOME_URL);
-        return ForumHtmlParsers.extractTopic(document, url);
+        return ForumHtmlParsers.extractTopic(document, url, page);
     }
 
     private List<TopicSummary> fetchTopicsFromApi(BoardDefinition board) throws IOException {
@@ -196,7 +232,7 @@ public final class NgaConnector implements ForumConnector {
         return topics;
     }
 
-    private TopicDetail fetchTopicFromApi(String url) throws IOException {
+    private TopicDetail fetchTopicFromApi(String url, int page) throws IOException {
         String tid = tidFromUrl(url);
         if (tid.isEmpty()) {
             throw new IOException("NGA 帖子链接缺少 tid。");
@@ -204,10 +240,11 @@ public final class NgaConnector implements ForumConnector {
 
         Map<String, String> form = new HashMap<>();
         form.put("tid", tid);
+        form.put("page", String.valueOf(Math.max(1, page)));
         JSONObject json = NetworkClient.postNgaApi(POST_API, form);
         JSONArray result = json.optJSONArray("result");
         if (result == null) {
-            return new TopicDetail("帖子详情", url, new ArrayList<>());
+            return new TopicDetail("帖子详情", url, new ArrayList<>(), page, false);
         }
 
         List<Post> posts = new ArrayList<>();
@@ -248,7 +285,7 @@ public final class NgaConnector implements ForumConnector {
         if (title.isEmpty()) {
             title = "帖子详情";
         }
-        return new TopicDetail(title, url, posts);
+        return new TopicDetail(title, url, posts, page, result.length() >= 20);
     }
 
     private List<BoardDefinition> fetchCategoryBoards() throws IOException {
@@ -630,8 +667,8 @@ public final class NgaConnector implements ForumConnector {
 
     private static String removeReplyBlocks(String rawContent) {
         String content = rawContent == null ? "" : rawContent;
-        content = QUOTE_BLOCK.matcher(content).replaceAll(" ");
-        return PID_REPLY.matcher(content).replaceAll(" ");
+        content = QUOTE_BLOCK.matcher(content).replaceAll("\n");
+        return PID_REPLY.matcher(content).replaceAll("\n");
     }
 
     private static ParsedInlineContent parseInlineContent(String content) {
@@ -829,10 +866,154 @@ public final class NgaConnector implements ForumConnector {
 
     private static Map<String, String> ubbEmoticonFiles() {
         Map<String, String> files = new HashMap<>();
-        files.put("ac:哭笑", "ac15.png");
-        files.put("ng:doge", "ng_11.png");
-        files.put("a2:doge", "a2_27.png");
+        putEmoticon(files, "ac", "blink", "ac0.png");
+        putEmoticon(files, "ac", "goodjob", "ac1.png");
+        putEmoticon(files, "ac", "上", "ac2.png");
+        putEmoticon(files, "ac", "中枪", "ac3.png");
+        putEmoticon(files, "ac", "偷笑", "ac4.png");
+        putEmoticon(files, "ac", "冷", "ac5.png");
+        putEmoticon(files, "ac", "凌乱", "ac6.png");
+        putEmoticon(files, "ac", "反对", "ac7.png");
+        putEmoticon(files, "ac", "吓", "ac8.png");
+        putEmoticon(files, "ac", "吻", "ac9.png");
+        putEmoticon(files, "ac", "呆", "ac10.png");
+        putEmoticon(files, "ac", "咦", "ac11.png");
+        putEmoticon(files, "ac", "哦", "ac12.png");
+        putEmoticon(files, "ac", "哭", "ac13.png");
+        putEmoticon(files, "ac", "哭1", "ac14.png");
+        putEmoticon(files, "ac", "哭笑", "ac15.png");
+        putEmoticon(files, "ac", "哼", "ac16.png");
+        putEmoticon(files, "ac", "喘", "ac17.png");
+        putEmoticon(files, "ac", "喷", "ac18.png");
+        putEmoticon(files, "ac", "嘲笑", "ac19.png");
+        putEmoticon(files, "ac", "嘲笑1", "ac20.png");
+        putEmoticon(files, "ac", "囧", "ac21.png");
+        putEmoticon(files, "ac", "委屈", "ac22.png");
+        putEmoticon(files, "ac", "心", "ac23.png");
+        putEmoticon(files, "ac", "忧伤", "ac24.png");
+        putEmoticon(files, "ac", "怒", "ac25.png");
+        putEmoticon(files, "ac", "怕", "ac26.png");
+        putEmoticon(files, "ac", "惊", "ac27.png");
+        putEmoticon(files, "ac", "愁", "ac28.png");
+        putEmoticon(files, "ac", "抓狂", "ac29.png");
+        putEmoticon(files, "ac", "抠鼻", "ac30.png");
+        putEmoticon(files, "ac", "擦汗", "ac31.png");
+        putEmoticon(files, "ac", "无语", "ac32.png");
+        putEmoticon(files, "ac", "晕", "ac33.png");
+        putEmoticon(files, "ac", "汗", "ac34.png");
+        putEmoticon(files, "ac", "瞎", "ac35.png");
+        putEmoticon(files, "ac", "羞", "ac36.png");
+        putEmoticon(files, "ac", "羡慕", "ac37.png");
+        putEmoticon(files, "ac", "花痴", "ac38.png");
+        putEmoticon(files, "ac", "茶", "ac39.png");
+        putEmoticon(files, "ac", "衰", "ac40.png");
+        putEmoticon(files, "ac", "计划通", "ac41.png");
+        putEmoticon(files, "ac", "赞同", "ac42.png");
+        putEmoticon(files, "ac", "闪光", "ac43.png");
+        putEmoticon(files, "ac", "黑枪", "ac44.png");
+
+        putEmoticon(files, "a2", "goodjob", "a2_02.png");
+        putEmoticon(files, "a2", "诶嘿", "a2_05.png");
+        putEmoticon(files, "a2", "偷笑", "a2_03.png");
+        putEmoticon(files, "a2", "怒", "a2_04.png");
+        putEmoticon(files, "a2", "笑", "a2_07.png");
+        putEmoticon(files, "a2", "那个…", "a2_08.png");
+        putEmoticon(files, "a2", "哦嗬嗬嗬", "a2_09.png");
+        putEmoticon(files, "a2", "舔", "a2_10.png");
+        putEmoticon(files, "a2", "鬼脸", "a2_14.png");
+        putEmoticon(files, "a2", "冷", "a2_16.png");
+        putEmoticon(files, "a2", "大哭", "a2_15.png");
+        putEmoticon(files, "a2", "哭", "a2_17.png");
+        putEmoticon(files, "a2", "恨", "a2_21.png");
+        putEmoticon(files, "a2", "中枪", "a2_23.png");
+        putEmoticon(files, "a2", "囧", "a2_24.png");
+        putEmoticon(files, "a2", "你看看你", "a2_25.png");
+        putEmoticon(files, "a2", "doge", "a2_27.png");
+        putEmoticon(files, "a2", "自戳双目", "a2_28.png");
+        putEmoticon(files, "a2", "偷吃", "a2_30.png");
+        putEmoticon(files, "a2", "冷笑", "a2_31.png");
+        putEmoticon(files, "a2", "壁咚", "a2_32.png");
+        putEmoticon(files, "a2", "不活了", "a2_33.png");
+        putEmoticon(files, "a2", "不明觉厉", "a2_36.png");
+        putEmoticon(files, "a2", "是在下输了", "a2_51.png");
+        putEmoticon(files, "a2", "你为猴这么", "a2_53.png");
+        putEmoticon(files, "a2", "干杯", "a2_54.png");
+        putEmoticon(files, "a2", "干杯2", "a2_55.png");
+        putEmoticon(files, "a2", "异议", "a2_47.png");
+        putEmoticon(files, "a2", "认真", "a2_48.png");
+        putEmoticon(files, "a2", "你已经死了", "a2_45.png");
+        putEmoticon(files, "a2", "你这种人…", "a2_49.png");
+        putEmoticon(files, "a2", "妮可妮可妮", "a2_18.png");
+        putEmoticon(files, "a2", "惊", "a2_19.png");
+        putEmoticon(files, "a2", "抢镜头", "a2_52.png");
+        putEmoticon(files, "a2", "yes", "a2_26.png");
+        putEmoticon(files, "a2", "有何贵干", "a2_11.png");
+        putEmoticon(files, "a2", "病娇", "a2_12.png");
+        putEmoticon(files, "a2", "lucky", "a2_13.png");
+        putEmoticon(files, "a2", "poi", "a2_20.png");
+        putEmoticon(files, "a2", "囧2", "a2_22.png");
+        putEmoticon(files, "a2", "威吓", "a2_42.png");
+        putEmoticon(files, "a2", "jojo立", "a2_37.png");
+        putEmoticon(files, "a2", "jojo立2", "a2_38.png");
+        putEmoticon(files, "a2", "jojo立3", "a2_39.png");
+        putEmoticon(files, "a2", "jojo立4", "a2_41.png");
+        putEmoticon(files, "a2", "jojo立5", "a2_40.png");
+
+        putEmoticon(files, "ng", "呲牙笑", "ng_1.png");
+        putEmoticon(files, "ng", "奸笑", "ng_2.png");
+        putEmoticon(files, "ng", "问号", "ng_3.png");
+        putEmoticon(files, "ng", "茶", "ng_4.png");
+        putEmoticon(files, "ng", "笑指", "ng_5.png");
+        putEmoticon(files, "ng", "燃尽", "ng_6.png");
+        putEmoticon(files, "ng", "晕", "ng_7.png");
+        putEmoticon(files, "ng", "扇笑", "ng_8.png");
+        putEmoticon(files, "ng", "寄", "ng_9.png");
+        putEmoticon(files, "ng", "别急", "ng_10.png");
+        putEmoticon(files, "ng", "doge", "ng_11.png");
+        putEmoticon(files, "ng", "丧", "ng_12.png");
+        putEmoticon(files, "ng", "汗", "ng_13.png");
+        putEmoticon(files, "ng", "叹气", "ng_15.png");
+        putEmoticon(files, "ng", "吃饼", "ng_16.png");
+        putEmoticon(files, "ng", "吃瓜", "ng_17.png");
+        putEmoticon(files, "ng", "吐舌", "ng_18.png");
+        putEmoticon(files, "ng", "哭", "ng_19.png");
+        putEmoticon(files, "ng", "喘", "ng_20.png");
+        putEmoticon(files, "ng", "心", "ng_21.png");
+        putEmoticon(files, "ng", "喷", "ng_22.png");
+        putEmoticon(files, "ng", "困", "ng_24.png");
+        putEmoticon(files, "ng", "大哭", "ng_25.png");
+        putEmoticon(files, "ng", "大惊", "ng_26.png");
+        putEmoticon(files, "ng", "害怕", "ng_27.png");
+        putEmoticon(files, "ng", "惊", "ng_28.png");
+        putEmoticon(files, "ng", "暴怒", "ng_30.png");
+        putEmoticon(files, "ng", "气愤", "ng_31.png");
+        putEmoticon(files, "ng", "热", "ng_32.png");
+        putEmoticon(files, "ng", "瓜不熟", "ng_33.png");
+        putEmoticon(files, "ng", "瞎", "ng_34.png");
+        putEmoticon(files, "ng", "色", "ng_35.png");
+        putEmoticon(files, "ng", "斜眼", "ng_37.png");
+        putEmoticon(files, "ng", "问号大", "ng_38.png");
+
+        putEmoticon(files, "pg", "战斗力", "pg01.png");
+        putEmoticon(files, "pg", "哈啤", "pg02.png");
+        putEmoticon(files, "pg", "满分", "pg03.png");
+        putEmoticon(files, "pg", "衰", "pg04.png");
+        putEmoticon(files, "pg", "拒绝", "pg05.png");
+        putEmoticon(files, "pg", "心", "pg06.png");
+        putEmoticon(files, "pg", "严肃", "pg07.png");
+        putEmoticon(files, "pg", "吃瓜", "pg08.png");
+        putEmoticon(files, "pg", "嘣", "pg09.png");
+        putEmoticon(files, "pg", "嘣2", "pg10.png");
+        putEmoticon(files, "pg", "冻", "pg11.png");
+        putEmoticon(files, "pg", "谢", "pg12.png");
+        putEmoticon(files, "pg", "哭", "pg13.png");
+        putEmoticon(files, "pg", "响指", "pg14.png");
+        putEmoticon(files, "pg", "转身", "pg15.png");
         return files;
+    }
+
+    private static void putEmoticon(Map<String, String> files, String group, String code, String fileName) {
+        files.put(group + ":" + code, fileName);
     }
 
     private static String twoDigit(int value) {
@@ -1031,20 +1212,48 @@ public final class NgaConnector implements ForumConnector {
 
     static String cleanApiContent(String content) {
         String value = content == null ? "" : content;
-        value = QUOTE_BLOCK.matcher(value).replaceAll(" ");
-        value = PID_REPLY.matcher(value).replaceAll(" ");
-        value = BBCODE_IMAGE.matcher(value).replaceAll(" ");
+        value = QUOTE_BLOCK.matcher(value).replaceAll("\n");
+        value = PID_REPLY.matcher(value).replaceAll("\n");
+        value = BBCODE_IMAGE.matcher(value).replaceAll("\n");
         value = replaceHtmlImageLabels(value);
-        value = value.replace("[br]", "\n")
-                .replace("[BR]", "\n")
-                .replace("<br>", "\n")
-                .replace("<br/>", "\n")
-                .replace("<br />", "\n");
+        value = replaceMatchWithGroup(value, BBCODE_URL, 1);
+        value = replaceMatchWithGroup(value, BBCODE_UID, 1);
+        value = normalizeApiLineBreaks(value);
+        value = BBCODE_SIMPLE_TAG.matcher(value).replaceAll(" ");
+        value = Parser.unescapeEntities(value, false);
+        value = normalizeApiLineBreaks(value);
+        value = LEADING_REPLY_QUOTE_BLOCK.matcher(value).replaceAll("\n");
+        value = REPLY_TO_HEADER.matcher(value).replaceAll("\n");
+        value = POST_BY_HEADER.matcher(value).replaceAll(" ");
         return value.replace('\u00a0', ' ')
+                .replace("[/url]", " ")
+                .replace("[url]", " ")
                 .replaceAll("<[^>]+>", " ")
-                .replaceAll("\\r?\\n\\s*", "\n")
+                .replaceAll("(?m)(^|\\s)>\\s+", "$1")
+                .replace("\r\n", "\n")
+                .replace('\r', '\n')
+                .replaceAll("[ \\t\\x0B\\f]+", " ")
+                .replaceAll("[ \\t]*\\n[ \\t]*", "\n")
+                .replaceAll("\\n{2,}", "\n")
                 .replaceAll("[ \\t]+", " ")
                 .trim();
+    }
+
+    private static String normalizeApiLineBreaks(String value) {
+        String normalized = API_BR.matcher(value).replaceAll("\n");
+        normalized = HTML_LINE_BREAK.matcher(normalized).replaceAll("\n");
+        normalized = HTML_ADJACENT_BLOCK_BOUNDARY.matcher(normalized).replaceAll("\n");
+        return HTML_BLOCK_BOUNDARY.matcher(normalized).replaceAll("\n");
+    }
+
+    private static String replaceMatchWithGroup(String value, Pattern pattern, int group) {
+        Matcher matcher = pattern.matcher(value);
+        StringBuffer buffer = new StringBuffer();
+        while (matcher.find()) {
+            matcher.appendReplacement(buffer, Matcher.quoteReplacement(matcher.group(group)));
+        }
+        matcher.appendTail(buffer);
+        return buffer.toString();
     }
 
     private static String replaceHtmlImageLabels(String html) {

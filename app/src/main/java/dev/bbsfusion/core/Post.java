@@ -8,6 +8,8 @@ public final class Post {
     public final String author;
     public final String avatarUrl;
     public final String meta;
+    public final String postedMeta;
+    public final String editedMeta;
     public final String replyContext;
     public final String content;
     public final List<String> imageUrls;
@@ -41,6 +43,8 @@ public final class Post {
         this.author = author;
         this.avatarUrl = avatarUrl == null ? "" : avatarUrl;
         this.meta = meta == null ? "" : meta.trim();
+        this.postedMeta = prefixedMeta(this.meta, "发表于");
+        this.editedMeta = prefixedMeta(this.meta, "编辑");
         this.replyContext = replyContext == null ? "" : replyContext.trim();
         this.content = content == null ? "" : content;
         if (imageUrls == null || imageUrls.isEmpty()) {
@@ -53,6 +57,20 @@ public final class Post {
         } else {
             this.inlineImages = Collections.unmodifiableList(new ArrayList<>(inlineImages));
         }
+    }
+
+    private static String prefixedMeta(String meta, String prefix) {
+        if (meta == null || meta.trim().isEmpty()) {
+            return "";
+        }
+        String[] parts = meta.split("\\s*·\\s*");
+        for (String part : parts) {
+            String value = part.trim();
+            if (value.startsWith(prefix)) {
+                return value;
+            }
+        }
+        return "";
     }
 
     public static final class InlineImage {

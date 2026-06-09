@@ -8,6 +8,7 @@ import dev.bbsfusion.core.TopicSummary;
 import org.json.JSONObject;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
+import org.jsoup.parser.Parser;
 import org.junit.Test;
 
 import java.util.List;
@@ -122,6 +123,38 @@ public final class LinuxDoConnectorTest {
     }
 
     @Test
+    public void extractsTopicsFromRssFeed() {
+        Document document = Jsoup.parse(
+                "<rss><channel><item>"
+                        + "<title>一个 RSS 主题</title>"
+                        + "<link>https://linux.do/t/topic/2349999</link>"
+                        + "<category>前沿快讯</category>"
+                        + "<description><![CDATA[<p>正文</p><p><small>3 个帖子 - 2 位参与者</small></p>]]></description>"
+                        + "<pubDate>Tue, 09 Jun 2026 06:16:45 +0000</pubDate>"
+                        + "</item></channel></rss>",
+                "https://linux.do/latest.rss",
+                Parser.xmlParser()
+        );
+        BoardDefinition board = new BoardDefinition(
+                "linuxdo",
+                "latest",
+                "最新",
+                "https://linux.do/latest",
+                "https://linux.do/",
+                "Linux.do 最新"
+        );
+
+        List<TopicSummary> topics = LinuxDoConnector.parseTopicsFromRss(document, board);
+
+        assertEquals(1, topics.size());
+        assertEquals("一个 RSS 主题", topics.get(0).title);
+        assertEquals("https://linux.do/t/topic/2349999", topics.get(0).url);
+        assertTrue(topics.get(0).meta.contains("Linux.do 前沿快讯"));
+        assertTrue(topics.get(0).meta.contains("2 回复"));
+        assertTrue(topics.get(0).sortTimeMillis > 0L);
+    }
+
+    @Test
     public void keepsInlineEmojiLabelsInCookedHtml() {
         LinuxDoConnector.ParsedContent content = LinuxDoConnector.parsedCooked(
                 "<p>正文<img class=\"emoji\" src=\"/images/emoji/twitter/smile.png\" title=\":smile:\">后续</p>"
@@ -131,6 +164,15 @@ public final class LinuxDoConnectorTest {
         assertEquals(0, content.imageUrls.size());
         assertEquals(1, content.inlineImages.size());
         assertEquals("https://linux.do/images/emoji/twitter/smile.png", content.inlineImages.get(0).sourceUrl);
+    }
+
+    @Test
+    public void preservesCookedParagraphBreaks() {
+        LinuxDoConnector.ParsedContent content = LinuxDoConnector.parsedCooked(
+                "<p>第一段</p><p>第二段<br>第三行</p>"
+        );
+
+        assertEquals("第一段\n第二段\n第三行", content.text);
     }
 
     @Test

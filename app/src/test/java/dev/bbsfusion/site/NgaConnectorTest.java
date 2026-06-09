@@ -81,6 +81,40 @@ public final class NgaConnectorTest {
     }
 
     @Test
+    public void rendersNamedUbbEmoticonsAsInlineImages() {
+        String content = "正文[s:ng:doge]中间[s:ac:哭笑]后续";
+
+        NgaConnector.ParsedApiContent parsed = NgaConnector.parseApiContent(new JSONObject(), content);
+
+        assertEquals("正文 [s:ng:doge] 中间 [s:ac:哭笑] 后续", parsed.text);
+        assertEquals(0, parsed.imageUrls.size());
+        assertEquals(2, parsed.inlineImages.size());
+        assertEquals(
+                "https://img4.nga.178.com/ngabbs/post/smile/ng_11.png",
+                parsed.inlineImages.get(0).sourceUrl
+        );
+        assertEquals(
+                "https://img4.nga.178.com/ngabbs/post/smile/ac15.png",
+                parsed.inlineImages.get(1).sourceUrl
+        );
+    }
+
+    @Test
+    public void treatsNgaSmileImageUrlsAsInlineImages() {
+        String content = "正文[img]https://img4.nga.178.com/ngabbs/post/smile/ac15.png[/img]后续";
+
+        NgaConnector.ParsedApiContent parsed = NgaConnector.parseApiContent(new JSONObject(), content);
+
+        assertEquals("正文 [s:ac:哭笑] 后续", parsed.text);
+        assertEquals(0, parsed.imageUrls.size());
+        assertEquals(1, parsed.inlineImages.size());
+        assertEquals(
+                "https://img4.nga.178.com/ngabbs/post/smile/ac15.png",
+                parsed.inlineImages.get(0).sourceUrl
+        );
+    }
+
+    @Test
     public void separatesQuoteFromApiContent() {
         String content = "[quote]alice 发表于 2026-6-8 17:50 原文[/quote]回复正文";
 

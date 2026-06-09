@@ -113,6 +113,23 @@ public final class ForumHtmlParsersTest {
     }
 
     @Test
+    public void keepsDiscuzSmileyLabelsInPostText() {
+        Document document = Jsoup.parse(
+                "<div id=\"post_1\"><table id=\"pid1\"><tr><td>" +
+                        "<div class=\"authi\"><a class=\"xw1\">alice</a></div>" +
+                        "<td class=\"t_f\" id=\"postmessage_1\">正文前" +
+                        "<img src=\"static/image/smiley/default/lol.gif\" alt=\"[笑]\" />" +
+                        "正文后，这是一段足够长的内容。</td></td></tr></table></div>",
+                "https://stage1st.com/2b/"
+        );
+
+        TopicDetail detail = ForumHtmlParsers.extractTopic(document, "https://stage1st.com/2b/thread-1-1-1.html");
+
+        assertEquals("正文前 [笑] 正文后，这是一段足够长的内容。", detail.posts.get(0).content);
+        assertEquals(0, detail.posts.get(0).imageUrls.size());
+    }
+
+    @Test
     public void extractsGenericPostAuthors() {
         Document document = Jsoup.parse(
                 "<div class=\"postrow\">" +

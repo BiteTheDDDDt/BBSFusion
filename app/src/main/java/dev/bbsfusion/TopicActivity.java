@@ -92,6 +92,7 @@ public final class TopicActivity extends Activity {
         titleView.setTextSize(20);
         titleView.setPadding(dp(16), dp(8), dp(16), dp(6));
         titleView.setMaxLines(4);
+        titleView.setTextIsSelectable(true);
         root.addView(titleView);
 
         statusView = new TextView(this);
@@ -184,6 +185,7 @@ public final class TopicActivity extends Activity {
         contentView.setTextColor(Color.rgb(32, 33, 36));
         contentView.setTextSize(16);
         contentView.setLineSpacing(0, 1.15f);
+        contentView.setTextIsSelectable(true);
         textColumn.addView(contentView);
 
         for (String imageUrl : post.imageUrls) {

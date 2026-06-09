@@ -118,4 +118,14 @@ public final class LinuxDoConnectorTest {
         assertEquals("一个 HTML 主题", topics.get(0).title);
         assertEquals("https://linux.do/t/sample-topic/201", topics.get(0).url);
     }
+
+    @Test
+    public void keepsInlineEmojiLabelsInCookedHtml() {
+        LinuxDoConnector.ParsedContent content = LinuxDoConnector.parsedCooked(
+                "<p>正文<img class=\"emoji\" src=\"/images/emoji/twitter/smile.png\" title=\":smile:\">后续</p>"
+        );
+
+        assertEquals("正文 :smile: 后续", content.text);
+        assertEquals(0, content.imageUrls.size());
+    }
 }

@@ -12,6 +12,7 @@ import org.json.JSONObject;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
+import org.jsoup.nodes.TextNode;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -443,6 +444,10 @@ public final class LinuxDoConnector implements ForumConnector {
         Document document = Jsoup.parse(html == null ? "" : html, BASE_URL + "/");
         List<String> imageUrls = new ArrayList<>();
         for (Element image : document.select("img[src]")) {
+            if (isInlineEmoji(image)) {
+                image.replaceWith(new TextNode(" " + inlineEmojiLabel(image) + " "));
+                continue;
+            }
             String src = absoluteLinuxDoUrl(image.attr("src"));
             if (!src.isEmpty() && !imageUrls.contains(src)) {
                 imageUrls.add(src);
@@ -451,6 +456,28 @@ public final class LinuxDoConnector implements ForumConnector {
         }
         String text = clean(document.text());
         return new ParsedContent(text, imageUrls);
+    }
+
+    private static boolean isInlineEmoji(Element image) {
+        String value = (
+                image.attr("src")
+                        + " " + image.attr("class")
+                        + " " + image.attr("alt")
+                        + " " + image.attr("title")
+        ).toLowerCase();
+        return value.contains("emoji")
+                || value.contains("emoticon")
+                || value.contains("twemoji")
+                || value.contains("smiley");
+    }
+
+    private static String inlineEmojiLabel(Element image) {
+        String label = firstNonEmpty(
+                image.attr("alt"),
+                image.attr("title"),
+                image.attr("aria-label")
+        );
+        return label.isEmpty() ? "[表情]" : label;
     }
 
     private static String discourseAvatar(String template) {

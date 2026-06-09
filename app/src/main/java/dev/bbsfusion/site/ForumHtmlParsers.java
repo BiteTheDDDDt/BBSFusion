@@ -7,6 +7,7 @@ import dev.bbsfusion.core.TopicSummary;
 
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
+import org.jsoup.nodes.TextNode;
 import org.jsoup.select.Elements;
 
 import java.net.URI;
@@ -219,7 +220,7 @@ public final class ForumHtmlParsers {
         for (String selector : selectors) {
             Elements elements = document.select(selector);
             for (Element element : elements) {
-                String text = clean(element.text());
+                String text = contentText(element);
                 List<String> imageUrls = extractPostImages(element);
                 if (text.length() < 12 && imageUrls.isEmpty()) {
                     continue;
@@ -272,7 +273,7 @@ public final class ForumHtmlParsers {
                 continue;
             }
 
-            String content = clean(contentElement.text());
+            String content = contentText(contentElement);
             List<String> imageUrls = extractPostImages(contentElement);
             if (content.length() < 12 && imageUrls.isEmpty()) {
                 continue;
@@ -412,6 +413,9 @@ public final class ForumHtmlParsers {
         List<String> imageUrls = new ArrayList<>();
         Set<String> seen = new HashSet<>();
         for (Element image : contentElement.select("img")) {
+            if (isInlineEmoticon(image)) {
+                continue;
+            }
             String url = firstImageUrl(image);
             if (url.isEmpty() || isDecorativeImage(url) || !seen.add(url)) {
                 continue;
@@ -422,6 +426,19 @@ public final class ForumHtmlParsers {
             }
         }
         return imageUrls;
+    }
+
+    private static String contentText(Element contentElement) {
+        Element copy = contentElement.clone();
+        for (Element image : copy.select("img")) {
+            String label = inlineImageLabel(image);
+            if (label.isEmpty()) {
+                image.remove();
+            } else {
+                image.replaceWith(new TextNode(" " + label + " "));
+            }
+        }
+        return clean(copy.text());
     }
 
     private static String firstImageUrl(Element image) {
@@ -445,6 +462,37 @@ public final class ForumHtmlParsers {
                 || value.contains("_avatar_")
                 || value.contains("common/none.gif")
                 || value.contains("common/back.gif");
+    }
+
+    private static boolean isInlineEmoticon(Element image) {
+        String value = (
+                firstImageUrl(image)
+                        + " " + image.attr("class")
+                        + " " + image.attr("smilieid")
+                        + " " + image.attr("data-code")
+        ).toLowerCase(Locale.ROOT);
+        return value.contains("/static/image/smiley/")
+                || value.contains("/image/smiley/")
+                || value.contains("/smiley/")
+                || value.contains("emoticon")
+                || value.contains("emoji")
+                || value.contains("smilie");
+    }
+
+    private static String inlineImageLabel(Element image) {
+        if (!isInlineEmoticon(image)) {
+            return "";
+        }
+        String label = firstNonEmpty(
+                image.attr("alt"),
+                image.attr("title"),
+                image.attr("data-code"),
+                image.attr("aria-label")
+        );
+        if (label.isEmpty()) {
+            return "[表情]";
+        }
+        return clean(label);
     }
 
     private static Element firstElement(Element root, String[] selectors) {
@@ -719,6 +767,15 @@ public final class ForumHtmlParsers {
         return text.replace('\u00a0', ' ')
                 .replaceAll("\\s+", " ")
                 .trim();
+    }
+
+    private static String firstNonEmpty(String... values) {
+        for (String value : values) {
+            if (value != null && !value.trim().isEmpty()) {
+                return value.trim();
+            }
+        }
+        return "";
     }
 
     private static String cleanPostTimeLabel(String text) {

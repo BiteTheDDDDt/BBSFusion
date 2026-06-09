@@ -56,6 +56,17 @@ public final class V2exConnectorTest {
     }
 
     @Test
+    public void keepsInlineEmojiLabelsInRenderedText() {
+        V2exConnector.ParsedContent content = V2exConnector.parsedContent(
+                "正文<img class=\"emoji\" src=\"/emoji/smile.png\" alt=\":smile:\">后续",
+                ""
+        );
+
+        assertEquals("正文 :smile: 后续", content.text);
+        assertEquals(0, content.imageUrls.size());
+    }
+
+    @Test
     public void extractsTopicIdFromTopicUrl() {
         assertEquals("456", V2exConnector.topicIdFromUrl("https://www.v2ex.com/t/456#reply1"));
     }

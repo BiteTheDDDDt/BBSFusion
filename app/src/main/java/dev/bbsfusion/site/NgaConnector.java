@@ -9,7 +9,10 @@ import dev.bbsfusion.core.TopicSummary;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
+import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
+import org.jsoup.nodes.TextNode;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -663,9 +666,10 @@ public final class NgaConnector implements ForumConnector {
         return "";
     }
 
-    private static String cleanApiContent(String content) {
+    static String cleanApiContent(String content) {
         String value = content == null ? "" : content;
         value = BBCODE_IMAGE.matcher(value).replaceAll(" ");
+        value = replaceHtmlImageLabels(value);
         value = value.replace("[br]", "\n")
                 .replace("[BR]", "\n")
                 .replace("<br>", "\n")
@@ -676,6 +680,46 @@ public final class NgaConnector implements ForumConnector {
                 .replaceAll("\\r?\\n\\s*", "\n")
                 .replaceAll("[ \\t]+", " ")
                 .trim();
+    }
+
+    private static String replaceHtmlImageLabels(String html) {
+        if (html == null || html.indexOf("<img") < 0) {
+            return html == null ? "" : html;
+        }
+        Document document = Jsoup.parseBodyFragment(html);
+        for (Element image : document.select("img")) {
+            String label = inlineImageLabel(image);
+            if (label.isEmpty()) {
+                image.remove();
+            } else {
+                image.replaceWith(new TextNode(" " + label + " "));
+            }
+        }
+        return document.body().html();
+    }
+
+    private static String inlineImageLabel(Element image) {
+        String value = (
+                image.attr("src")
+                        + " " + image.attr("file")
+                        + " " + image.attr("class")
+                        + " " + image.attr("alt")
+                        + " " + image.attr("title")
+        ).toLowerCase();
+        boolean emoticon = value.contains("/smiley/")
+                || value.contains("emoticon")
+                || value.contains("emoji")
+                || value.contains("ubb");
+        if (!emoticon) {
+            return "";
+        }
+        String label = firstNonEmpty(
+                image.attr("alt"),
+                image.attr("title"),
+                image.attr("data-code"),
+                image.attr("aria-label")
+        );
+        return label.isEmpty() ? "[表情]" : label;
     }
 
     private static long firstPositive(long... values) {

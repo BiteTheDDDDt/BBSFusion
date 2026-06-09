@@ -55,4 +55,11 @@ public final class NgaConnectorTest {
 
         assertEquals("发表于 2026-6-8 17:50 · 编辑 2026-6-8 18:50", meta);
     }
+
+    @Test
+    public void keepsHtmlEmoticonLabelsInApiContent() {
+        String content = "正文<img src=\"/smiley/ac/lol.png\" alt=\"[笑]\">后续";
+
+        assertEquals("正文 [笑] 后续", NgaConnector.cleanApiContent(content));
+    }
 }

@@ -1,5 +1,9 @@
 # BBSFusion
 
+<p align="center">
+  <img src="docs/assets/logo.svg" alt="BBSFusion logo" width="144">
+</p>
+
 BBSFusion is a local-only Android forum reader MVP for S1, NGA, V2EX, and Linux.do.
 
 ## Scope

@@ -41,6 +41,22 @@ public final class FeedOrderingTest {
     }
 
     @Test
+    public void interleavesTimedTopicsBySiteWithinSameMinute() {
+        long minute = 1_780_920L * 60_000L;
+        List<TopicSummary> ordered = FeedOrdering.order(Arrays.asList(
+                topic("nga", "nga-1", minute + 50_000L),
+                topic("nga", "nga-2", minute + 40_000L),
+                topic("s1", "s1-1", minute),
+                topic("s1", "s1-2", minute)
+        ));
+
+        assertEquals("nga-1", ordered.get(0).title);
+        assertEquals("s1-1", ordered.get(1).title);
+        assertEquals("nga-2", ordered.get(2).title);
+        assertEquals("s1-2", ordered.get(3).title);
+    }
+
+    @Test
     public void interleavesUntimedTopicsBySiteAfterTimedTopics() {
         List<TopicSummary> ordered = FeedOrdering.order(Arrays.asList(
                 topic("nga", "nga-1", 0L),

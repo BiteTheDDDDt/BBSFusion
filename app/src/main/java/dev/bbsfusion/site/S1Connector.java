@@ -15,10 +15,14 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class S1Connector implements ForumConnector {
+    private static final int TOPIC_LIST_PAGE_LIMIT = 4;
+    private static final int TOPIC_LIST_LIMIT = 80;
     private static final String HOME_URL =
             "https://stage1st.com/2b/forum-157-1.html";
     private static final String LOGIN_URL =
             "https://stage1st.com/2b/member.php?mod=logging&action=login&mobile=2";
+    private static final Pattern BOARD_PAGE_URL =
+            Pattern.compile("(forum--?\\d+-)\\d+(\\.html)");
     private static final Pattern THREAD_PAGE_URL =
             Pattern.compile("(thread-\\d+-)\\d+(-\\d+\\.html)");
 
@@ -49,8 +53,29 @@ public final class S1Connector implements ForumConnector {
 
     @Override
     public List<TopicSummary> fetchTopics(BoardDefinition board) throws IOException {
-        Document document = NetworkClient.getDesktop(board.url, board.referrer);
-        return ForumHtmlParsers.extractTopics(document, id(), board.url, board.sourceLabel);
+        List<TopicSummary> topics = new ArrayList<>();
+        for (int page = 1; page <= TOPIC_LIST_PAGE_LIMIT && topics.size() < TOPIC_LIST_LIMIT; page++) {
+            String pageUrl = pagedBoardUrl(board.url, page);
+            List<TopicSummary> pageTopics;
+            try {
+                Document document = NetworkClient.getDesktop(pageUrl, board.referrer);
+                pageTopics = ForumHtmlParsers.extractTopics(document, id(), pageUrl, board.sourceLabel);
+            } catch (IOException error) {
+                if (page == 1) {
+                    throw error;
+                }
+                break;
+            }
+            if (pageTopics.isEmpty()) {
+                break;
+            }
+            int before = topics.size();
+            appendUniqueTopics(topics, pageTopics);
+            if (topics.size() == before || topics.size() >= TOPIC_LIST_LIMIT || pageTopics.size() < 20) {
+                break;
+            }
+        }
+        return topics;
     }
 
     @Override
@@ -102,5 +127,39 @@ public final class S1Connector implements ForumConnector {
             return url.replaceFirst("([?&]page=)\\d+", "$1" + page);
         }
         return url + (url.contains("?") ? "&" : "?") + "page=" + page;
+    }
+
+    static String pagedBoardUrl(String url, int page) {
+        if (page <= 1 || url == null || url.isEmpty()) {
+            return url;
+        }
+        Matcher matcher = BOARD_PAGE_URL.matcher(url);
+        if (matcher.find()) {
+            return matcher.replaceFirst(Matcher.quoteReplacement(
+                    matcher.group(1) + page + matcher.group(2)
+            ));
+        }
+        if (url.contains("page=")) {
+            return url.replaceFirst("([?&]page=)\\d+", "$1" + page);
+        }
+        return url + (url.contains("?") ? "&" : "?") + "page=" + page;
+    }
+
+    private static void appendUniqueTopics(List<TopicSummary> target, List<TopicSummary> candidates) {
+        for (TopicSummary topic : candidates) {
+            if (target.size() >= TOPIC_LIST_LIMIT) {
+                return;
+            }
+            boolean exists = false;
+            for (TopicSummary existing : target) {
+                if (existing.url.equals(topic.url)) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                target.add(topic);
+            }
+        }
     }
 }

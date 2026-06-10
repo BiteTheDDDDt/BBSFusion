@@ -1,13 +1,50 @@
 package dev.bbsfusion.site;
 
+import dev.bbsfusion.core.BoardDefinition;
+
 import org.json.JSONObject;
 import org.junit.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
 
 public final class NgaConnectorTest {
+    @Test
+    public void buildsBoardFormForPagedFidBoards() {
+        BoardDefinition board = new BoardDefinition(
+                "nga",
+                "-7",
+                "网事杂谈",
+                "https://bbs.nga.cn/thread.php?fid=-7",
+                "https://bbs.nga.cn/",
+                "NGA 网事杂谈"
+        );
+
+        Map<String, String> form = NgaConnector.boardForm(board, 3);
+
+        assertEquals("-7", form.get("fid"));
+        assertEquals("3", form.get("page"));
+    }
+
+    @Test
+    public void buildsBoardFormForPagedStidBoards() {
+        BoardDefinition board = new BoardDefinition(
+                "nga",
+                "stid:123",
+                "子版",
+                "https://bbs.nga.cn/thread.php?stid=123",
+                "https://bbs.nga.cn/",
+                "NGA 子版"
+        );
+
+        Map<String, String> form = NgaConnector.boardForm(board, 2);
+
+        assertEquals("123", form.get("stid"));
+        assertEquals("2", form.get("page"));
+    }
+
     @Test
     public void extractsAuthorAndAvatarFromNestedAuthorObject() throws Exception {
         JSONObject item = new JSONObject(

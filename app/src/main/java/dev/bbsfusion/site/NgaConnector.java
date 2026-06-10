@@ -30,6 +30,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class NgaConnector implements ForumConnector {
+    private static final int TOPIC_LIST_PAGE_LIMIT = 4;
+    private static final int TOPIC_LIST_LIMIT = 80;
     private static final String HOME_URL = "https://bbs.nga.cn/thread.php?fid=-7";
     private static final String LOGIN_URL = "https://bbs.nga.cn/nuke.php?__lib=login&__act=account&login";
     private static final String SUBJECT_API =
@@ -184,7 +186,31 @@ public final class NgaConnector implements ForumConnector {
     }
 
     private List<TopicSummary> fetchTopicsFromApi(BoardDefinition board) throws IOException {
-        JSONObject json = NetworkClient.postNgaApi(SUBJECT_API, boardForm(board));
+        List<TopicSummary> topics = new ArrayList<>();
+        for (int page = 1; page <= TOPIC_LIST_PAGE_LIMIT && topics.size() < TOPIC_LIST_LIMIT; page++) {
+            List<TopicSummary> pageTopics;
+            try {
+                pageTopics = fetchTopicsFromApiPage(board, page);
+            } catch (IOException error) {
+                if (page == 1) {
+                    throw error;
+                }
+                break;
+            }
+            if (pageTopics.isEmpty()) {
+                break;
+            }
+            int before = topics.size();
+            appendUniqueTopics(topics, pageTopics);
+            if (topics.size() == before || topics.size() >= TOPIC_LIST_LIMIT || pageTopics.size() < 20) {
+                break;
+            }
+        }
+        return topics;
+    }
+
+    private List<TopicSummary> fetchTopicsFromApiPage(BoardDefinition board, int page) throws IOException {
+        JSONObject json = NetworkClient.postNgaApi(SUBJECT_API, boardForm(board, page));
         JSONObject result = json.optJSONObject("result");
         JSONArray data = result == null ? null : result.optJSONArray("data");
         List<TopicSummary> topics = new ArrayList<>();
@@ -198,7 +224,7 @@ public final class NgaConnector implements ForumConnector {
             label = "NGA " + forumName;
         }
 
-        for (int i = 0; i < data.length() && topics.size() < 80; i++) {
+        for (int i = 0; i < data.length() && topics.size() < TOPIC_LIST_LIMIT; i++) {
             JSONObject item = data.optJSONObject(i);
             if (item == null || !item.has("tid")) {
                 continue;
@@ -401,14 +427,35 @@ public final class NgaConnector implements ForumConnector {
         return boards;
     }
 
-    private Map<String, String> boardForm(BoardDefinition board) {
+    static Map<String, String> boardForm(BoardDefinition board, int page) {
         Map<String, String> form = new HashMap<>();
         if (board.boardId.startsWith(STID_PREFIX)) {
             form.put("stid", board.boardId.substring(STID_PREFIX.length()));
         } else {
             form.put("fid", board.boardId);
         }
+        if (page > 1) {
+            form.put("page", String.valueOf(page));
+        }
         return form;
+    }
+
+    private static void appendUniqueTopics(List<TopicSummary> target, List<TopicSummary> candidates) {
+        for (TopicSummary topic : candidates) {
+            if (target.size() >= TOPIC_LIST_LIMIT) {
+                return;
+            }
+            boolean exists = false;
+            for (TopicSummary existing : target) {
+                if (existing.url.equals(topic.url)) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                target.add(topic);
+            }
+        }
     }
 
     private static String tidFromUrl(String url) {

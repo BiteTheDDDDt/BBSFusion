@@ -28,8 +28,8 @@ android {
         applicationId = "dev.bbsfusion"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.3"
+        versionCode = 5
+        versionName = "0.3.1"
 
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
     }

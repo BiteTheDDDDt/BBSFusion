@@ -15,8 +15,6 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class S1Connector implements ForumConnector {
-    private static final int TOPIC_LIST_PAGE_LIMIT = 4;
-    private static final int TOPIC_LIST_LIMIT = 80;
     private static final String HOME_URL =
             "https://stage1st.com/2b/forum-157-1.html";
     private static final String LOGIN_URL =
@@ -53,29 +51,14 @@ public final class S1Connector implements ForumConnector {
 
     @Override
     public List<TopicSummary> fetchTopics(BoardDefinition board) throws IOException {
-        List<TopicSummary> topics = new ArrayList<>();
-        for (int page = 1; page <= TOPIC_LIST_PAGE_LIMIT && topics.size() < TOPIC_LIST_LIMIT; page++) {
-            String pageUrl = pagedBoardUrl(board.url, page);
-            List<TopicSummary> pageTopics;
-            try {
-                Document document = NetworkClient.getDesktop(pageUrl, board.referrer);
-                pageTopics = ForumHtmlParsers.extractTopics(document, id(), pageUrl, board.sourceLabel);
-            } catch (IOException error) {
-                if (page == 1) {
-                    throw error;
-                }
-                break;
-            }
-            if (pageTopics.isEmpty()) {
-                break;
-            }
-            int before = topics.size();
-            appendUniqueTopics(topics, pageTopics);
-            if (topics.size() == before || topics.size() >= TOPIC_LIST_LIMIT || pageTopics.size() < 20) {
-                break;
-            }
-        }
-        return topics;
+        return fetchTopics(board, 1);
+    }
+
+    @Override
+    public List<TopicSummary> fetchTopics(BoardDefinition board, int page) throws IOException {
+        String pageUrl = pagedBoardUrl(board.url, page);
+        Document document = NetworkClient.getDesktop(pageUrl, board.referrer);
+        return ForumHtmlParsers.extractTopics(document, id(), pageUrl, board.sourceLabel);
     }
 
     @Override
@@ -145,21 +128,4 @@ public final class S1Connector implements ForumConnector {
         return url + (url.contains("?") ? "&" : "?") + "page=" + page;
     }
 
-    private static void appendUniqueTopics(List<TopicSummary> target, List<TopicSummary> candidates) {
-        for (TopicSummary topic : candidates) {
-            if (target.size() >= TOPIC_LIST_LIMIT) {
-                return;
-            }
-            boolean exists = false;
-            for (TopicSummary existing : target) {
-                if (existing.url.equals(topic.url)) {
-                    exists = true;
-                    break;
-                }
-            }
-            if (!exists) {
-                target.add(topic);
-            }
-        }
-    }
 }

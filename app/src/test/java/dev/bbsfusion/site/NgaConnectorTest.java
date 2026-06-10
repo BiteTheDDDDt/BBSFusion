@@ -46,6 +46,14 @@ public final class NgaConnectorTest {
     }
 
     @Test
+    public void buildsWebFallbackBoardPageUrls() {
+        assertEquals(
+                "https://bbs.nga.cn/thread.php?fid=-7&page=3",
+                NgaConnector.pagedBoardUrl("https://bbs.nga.cn/thread.php?fid=-7", 3)
+        );
+    }
+
+    @Test
     public void extractsAuthorAndAvatarFromNestedAuthorObject() throws Exception {
         JSONObject item = new JSONObject(
                 "{"

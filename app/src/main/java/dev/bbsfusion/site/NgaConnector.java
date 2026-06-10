@@ -30,8 +30,6 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public final class NgaConnector implements ForumConnector {
-    private static final int TOPIC_LIST_PAGE_LIMIT = 4;
-    private static final int TOPIC_LIST_LIMIT = 80;
     private static final String HOME_URL = "https://bbs.nga.cn/thread.php?fid=-7";
     private static final String LOGIN_URL = "https://bbs.nga.cn/nuke.php?__lib=login&__act=account&login";
     private static final String SUBJECT_API =
@@ -132,10 +130,21 @@ public final class NgaConnector implements ForumConnector {
     @Override
     public List<TopicSummary> fetchTopics(BoardDefinition board) throws IOException {
         try {
-            return fetchTopicsFromApi(board);
+            return fetchTopicsFromApiPage(board, 1);
         } catch (IOException error) {
             Document document = NetworkClient.get(board.url, board.referrer);
             return ForumHtmlParsers.extractTopics(document, id(), board.url, board.sourceLabel);
+        }
+    }
+
+    @Override
+    public List<TopicSummary> fetchTopics(BoardDefinition board, int page) throws IOException {
+        try {
+            return fetchTopicsFromApiPage(board, page);
+        } catch (IOException error) {
+            String pageUrl = pagedBoardUrl(board.url, page);
+            Document document = NetworkClient.get(pageUrl, board.referrer);
+            return ForumHtmlParsers.extractTopics(document, id(), pageUrl, board.sourceLabel);
         }
     }
 
@@ -185,30 +194,6 @@ public final class NgaConnector implements ForumConnector {
         return ForumHtmlParsers.extractTopic(document, url, page);
     }
 
-    private List<TopicSummary> fetchTopicsFromApi(BoardDefinition board) throws IOException {
-        List<TopicSummary> topics = new ArrayList<>();
-        for (int page = 1; page <= TOPIC_LIST_PAGE_LIMIT && topics.size() < TOPIC_LIST_LIMIT; page++) {
-            List<TopicSummary> pageTopics;
-            try {
-                pageTopics = fetchTopicsFromApiPage(board, page);
-            } catch (IOException error) {
-                if (page == 1) {
-                    throw error;
-                }
-                break;
-            }
-            if (pageTopics.isEmpty()) {
-                break;
-            }
-            int before = topics.size();
-            appendUniqueTopics(topics, pageTopics);
-            if (topics.size() == before || topics.size() >= TOPIC_LIST_LIMIT || pageTopics.size() < 20) {
-                break;
-            }
-        }
-        return topics;
-    }
-
     private List<TopicSummary> fetchTopicsFromApiPage(BoardDefinition board, int page) throws IOException {
         JSONObject json = NetworkClient.postNgaApi(SUBJECT_API, boardForm(board, page));
         JSONObject result = json.optJSONObject("result");
@@ -224,7 +209,7 @@ public final class NgaConnector implements ForumConnector {
             label = "NGA " + forumName;
         }
 
-        for (int i = 0; i < data.length() && topics.size() < TOPIC_LIST_LIMIT; i++) {
+        for (int i = 0; i < data.length() && topics.size() < 80; i++) {
             JSONObject item = data.optJSONObject(i);
             if (item == null || !item.has("tid")) {
                 continue;
@@ -440,22 +425,14 @@ public final class NgaConnector implements ForumConnector {
         return form;
     }
 
-    private static void appendUniqueTopics(List<TopicSummary> target, List<TopicSummary> candidates) {
-        for (TopicSummary topic : candidates) {
-            if (target.size() >= TOPIC_LIST_LIMIT) {
-                return;
-            }
-            boolean exists = false;
-            for (TopicSummary existing : target) {
-                if (existing.url.equals(topic.url)) {
-                    exists = true;
-                    break;
-                }
-            }
-            if (!exists) {
-                target.add(topic);
-            }
+    static String pagedBoardUrl(String url, int page) {
+        if (page <= 1 || url == null || url.isEmpty()) {
+            return url;
         }
+        if (url.contains("page=")) {
+            return url.replaceFirst("([?&]page=)\\d+", "$1" + page);
+        }
+        return url + (url.contains("?") ? "&" : "?") + "page=" + page;
     }
 
     private static String tidFromUrl(String url) {

@@ -18,17 +18,16 @@ import android.widget.TextView;
 
 import dev.bbsfusion.core.BoardDefinition;
 import dev.bbsfusion.core.ConnectorRegistry;
-import dev.bbsfusion.core.FeedOrdering;
 import dev.bbsfusion.core.ForumConnector;
 import dev.bbsfusion.core.SubscriptionGroup;
 import dev.bbsfusion.core.SubscriptionStore;
+import dev.bbsfusion.core.TimelineFeedAggregator;
 import dev.bbsfusion.core.TopicSummary;
 import dev.bbsfusion.ui.TopicAdapter;
 
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -201,18 +200,11 @@ public final class MainActivity extends Activity {
         status.setText("正在加载 " + group.name + "...");
 
         executor.execute(() -> {
-            List<TopicSummary> result = new ArrayList<>();
-            List<String> failures = new ArrayList<>();
-            for (BoardDefinition board : group.boards) {
-                try {
-                    ForumConnector connector = ConnectorRegistry.byId(board.siteId);
-                    result.addAll(connector.fetchTopics(board));
-                } catch (Exception error) {
-                    failures.add(board.sourceLabel + "：" + concise(error.getMessage()));
-                }
-            }
-            List<TopicSummary> deduped = dedupe(result);
-            mainHandler.post(() -> applyLoadedTopics(key, group.name, deduped, failures));
+            TimelineFeedAggregator.Result result = TimelineFeedAggregator.load(
+                    group.boards,
+                    (board, page) -> ConnectorRegistry.byId(board.siteId).fetchTopics(board, page)
+            );
+            mainHandler.post(() -> applyLoadedTopics(key, group.name, result.topics, result.failures));
         });
     }
 
@@ -289,18 +281,6 @@ public final class MainActivity extends Activity {
             }
         }
         return connectors;
-    }
-
-    private List<TopicSummary> dedupe(List<TopicSummary> source) {
-        Map<String, TopicSummary> byUrl = new LinkedHashMap<>();
-        for (TopicSummary topic : source) {
-            String key = topic.siteId + ":" + topic.url;
-            TopicSummary existing = byUrl.get(key);
-            if (existing == null || topic.sortTimeMillis >= existing.sortTimeMillis) {
-                byUrl.put(key, topic);
-            }
-        }
-        return FeedOrdering.order(new ArrayList<>(byUrl.values()));
     }
 
     private String targetKey() {

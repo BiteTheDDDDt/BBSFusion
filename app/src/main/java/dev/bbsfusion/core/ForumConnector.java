@@ -1,6 +1,7 @@
 package dev.bbsfusion.core;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.List;
 
 public interface ForumConnector {
@@ -15,6 +16,13 @@ public interface ForumConnector {
     List<TopicSummary> fetchTopics() throws IOException;
 
     List<TopicSummary> fetchTopics(BoardDefinition board) throws IOException;
+
+    default List<TopicSummary> fetchTopics(BoardDefinition board, int page) throws IOException {
+        if (page <= 1) {
+            return fetchTopics(board);
+        }
+        return Collections.emptyList();
+    }
 
     List<BoardDefinition> fetchAvailableBoards() throws IOException;
 

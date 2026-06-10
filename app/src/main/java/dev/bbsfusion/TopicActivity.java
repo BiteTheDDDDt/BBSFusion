@@ -58,6 +58,7 @@ public final class TopicActivity extends Activity {
     private String topicUrl;
     private String initialTitle;
     private int loadedPage = 1;
+    private int displayedPostCount;
     private boolean isLoadingPage;
     private boolean hasMorePages;
 
@@ -180,8 +181,9 @@ public final class TopicActivity extends Activity {
     private void renderTopic(TopicDetail detail) {
         titleView.setText(detail.title);
         postsContainer.removeAllViews();
+        displayedPostCount = 0;
         for (Post post : detail.posts) {
-            addPostView(post);
+            addPostView(post, ++displayedPostCount);
         }
         loadedPage = detail.pageNumber;
         hasMorePages = detail.hasMore;
@@ -192,7 +194,7 @@ public final class TopicActivity extends Activity {
 
     private void appendTopic(TopicDetail detail) {
         for (Post post : detail.posts) {
-            addPostView(post);
+            addPostView(post, ++displayedPostCount);
         }
         loadedPage = detail.pageNumber;
         hasMorePages = detail.hasMore && !detail.posts.isEmpty();
@@ -226,10 +228,10 @@ public final class TopicActivity extends Activity {
     }
 
     private void addPostText(String author, String content) {
-        addPostView(new Post(author, content));
+        addPostView(new Post(author, content), 0);
     }
 
-    private void addPostView(Post post) {
+    private void addPostView(Post post, int floorNumber) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setPadding(dp(16), dp(14), dp(16), dp(12));
@@ -249,12 +251,33 @@ public final class TopicActivity extends Activity {
         textColumn.setOrientation(LinearLayout.VERTICAL);
         textColumn.setPadding(dp(12), 0, 0, 0);
 
+        LinearLayout headerRow = new LinearLayout(this);
+        headerRow.setOrientation(LinearLayout.HORIZONTAL);
+        headerRow.setGravity(Gravity.CENTER_VERTICAL);
+
         TextView authorView = new TextView(this);
         authorView.setText(post.author);
         authorView.setTextColor(Color.rgb(37, 108, 90));
         authorView.setTextSize(13);
-        authorView.setPadding(0, 0, 0, dp(2));
-        textColumn.addView(authorView);
+        authorView.setMaxLines(1);
+        headerRow.addView(authorView, new LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1
+        ));
+
+        if (floorNumber > 0) {
+            TextView floorView = new TextView(this);
+            floorView.setText(floorLabel(floorNumber));
+            floorView.setTextColor(Color.rgb(117, 117, 117));
+            floorView.setTextSize(12);
+            floorView.setGravity(Gravity.END);
+            floorView.setPadding(dp(8), 0, 0, 0);
+            headerRow.addView(floorView);
+        }
+
+        headerRow.setPadding(0, 0, 0, dp(2));
+        textColumn.addView(headerRow);
 
         addMetaViews(textColumn, post);
 
@@ -311,6 +334,10 @@ public final class TopicActivity extends Activity {
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 1
         ));
+    }
+
+    private String floorLabel(int floorNumber) {
+        return floorNumber + "楼";
     }
 
     private FrameLayout makeAvatarFrame(String avatarUrl) {

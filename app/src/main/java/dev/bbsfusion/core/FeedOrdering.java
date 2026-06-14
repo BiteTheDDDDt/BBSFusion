@@ -9,19 +9,22 @@ import java.util.Map;
 import java.util.TreeMap;
 
 public final class FeedOrdering {
+    private static final long TIMELINE_WINDOW_MILLIS = 10 * 60_000L;
+
     private FeedOrdering() {
     }
 
     public static List<TopicSummary> order(List<TopicSummary> topics) {
-        Map<Long, List<TopicSummary>> timedByMinute = new TreeMap<>(Collections.reverseOrder());
+        long newestTimeMillis = newestTimeMillis(topics);
+        Map<Long, List<TopicSummary>> timedByWindow = new TreeMap<>();
         Map<String, List<TopicSummary>> untimedBySite = new LinkedHashMap<>();
         for (TopicSummary topic : topics) {
             if (topic.sortTimeMillis > 0L) {
-                long minute = topic.sortTimeMillis / 60_000L;
-                List<TopicSummary> bucket = timedByMinute.get(minute);
+                long window = (newestTimeMillis - topic.sortTimeMillis) / TIMELINE_WINDOW_MILLIS;
+                List<TopicSummary> bucket = timedByWindow.get(window);
                 if (bucket == null) {
                     bucket = new ArrayList<>();
-                    timedByMinute.put(minute, bucket);
+                    timedByWindow.put(window, bucket);
                 }
                 bucket.add(topic);
             } else {
@@ -35,14 +38,24 @@ public final class FeedOrdering {
         }
 
         List<TopicSummary> ordered = new ArrayList<>();
-        for (List<TopicSummary> bucket : timedByMinute.values()) {
-            ordered.addAll(orderMinuteBucket(bucket));
+        for (List<TopicSummary> bucket : timedByWindow.values()) {
+            ordered.addAll(orderTimelineWindow(bucket));
         }
         ordered.addAll(roundRobin(untimedBySite));
         return ordered;
     }
 
-    private static List<TopicSummary> orderMinuteBucket(List<TopicSummary> topics) {
+    private static long newestTimeMillis(List<TopicSummary> topics) {
+        long newest = 0L;
+        for (TopicSummary topic : topics) {
+            if (topic.sortTimeMillis > newest) {
+                newest = topic.sortTimeMillis;
+            }
+        }
+        return newest;
+    }
+
+    private static List<TopicSummary> orderTimelineWindow(List<TopicSummary> topics) {
         Collections.sort(topics, Comparator.comparingLong(
                 (TopicSummary topic) -> topic.sortTimeMillis
         ).reversed());

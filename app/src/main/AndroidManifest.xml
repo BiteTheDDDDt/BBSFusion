@@ -24,6 +24,10 @@
             android:exported="false" />
 
         <activity
+            android:name=".SessionActivity"
+            android:exported="false" />
+
+        <activity
             android:name=".MainActivity"
             android:exported="true">
             <intent-filter>

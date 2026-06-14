@@ -1,7 +1,6 @@
 package dev.bbsfusion;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
@@ -16,9 +15,7 @@ import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
 
-import dev.bbsfusion.core.BoardDefinition;
 import dev.bbsfusion.core.ConnectorRegistry;
-import dev.bbsfusion.core.ForumConnector;
 import dev.bbsfusion.core.SubscriptionGroup;
 import dev.bbsfusion.core.SubscriptionStore;
 import dev.bbsfusion.core.TimelineFeedAggregator;
@@ -41,6 +38,7 @@ public final class MainActivity extends Activity {
     private final List<SubscriptionGroup> shortcutGroups = new ArrayList<>();
     private final Map<String, List<TopicSummary>> topicCache = new HashMap<>();
     private final Set<String> loadedTargets = new HashSet<>();
+    private final Set<String> loadingTargets = new HashSet<>();
 
     private SubscriptionGroup selectedGroup;
     private TopicAdapter adapter;
@@ -57,7 +55,7 @@ public final class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         reloadShortcutGroups();
         setContentView(createContentView());
-        selectGroup(selectedGroup, false);
+        selectGroup(selectedGroup, true);
     }
 
     @Override
@@ -66,7 +64,7 @@ public final class MainActivity extends Activity {
         reloadShortcutGroups();
         if (adapter != null) {
             updateShortcutButtonLabels();
-            selectGroup(selectedGroup, false);
+            selectGroup(selectedGroup, true);
         }
     }
 
@@ -122,8 +120,8 @@ public final class MainActivity extends Activity {
 
         configButton = makeButton("板块配置");
         configButton.setOnClickListener(v -> startActivity(new Intent(this, SubscriptionActivity.class)));
-        loginButton = makeButton("原站登录");
-        loginButton.setOnClickListener(v -> openLogin());
+        loginButton = makeButton("会话管理");
+        loginButton.setOnClickListener(v -> startActivity(new Intent(this, SessionActivity.class)));
         refreshButton = makeButton("刷新");
         refreshButton.setOnClickListener(v -> refreshTopics());
 
@@ -185,7 +183,7 @@ public final class MainActivity extends Activity {
             status.setText(selectedGroup.name + " 已选择：" + boardCount + " 个板块。点刷新加载。");
         }
 
-        if (autoRefresh && !loadedTargets.contains(key)) {
+        if (autoRefresh && !loadedTargets.contains(key) && !loadingTargets.contains(key)) {
             refreshTopics();
         }
     }
@@ -195,7 +193,12 @@ public final class MainActivity extends Activity {
     }
 
     private void refreshGroup(SubscriptionGroup group) {
+        if (group == null) {
+            status.setText("还没有订阅组，请先进入板块配置。");
+            return;
+        }
         String key = targetKey();
+        loadingTargets.add(key);
         refreshButton.setEnabled(false);
         status.setText("正在加载 " + group.name + "...");
 
@@ -215,6 +218,7 @@ public final class MainActivity extends Activity {
             List<String> failures
     ) {
         refreshButton.setEnabled(true);
+        loadingTargets.remove(key);
         loadedTargets.add(key);
         topicCache.put(key, new ArrayList<>(result));
         if (!key.equals(targetKey())) {
@@ -238,49 +242,12 @@ public final class MainActivity extends Activity {
 
     private void applyLoadFailure(String key, String name, String message) {
         refreshButton.setEnabled(true);
+        loadingTargets.remove(key);
         loadedTargets.add(key);
         if (!key.equals(targetKey())) {
             return;
         }
         status.setText(name + " 加载失败：" + concise(message));
-    }
-
-    private void openLogin() {
-        if (selectedGroup == null) {
-            status.setText("还没有订阅组，先去板块配置里添加。");
-            return;
-        }
-
-        List<ForumConnector> connectors = loginConnectorsForGroup();
-        if (connectors.isEmpty()) {
-            status.setText("当前订阅组没有板块，先去板块配置里添加。");
-        } else if (connectors.size() == 1) {
-            ForumConnector connector = connectors.get(0);
-            OriginalWebActivity.open(this, connector.loginUrl(), connector.name() + " 登录");
-        } else {
-            String[] labels = new String[connectors.size()];
-            for (int i = 0; i < connectors.size(); i++) {
-                labels[i] = connectors.get(i).name();
-            }
-            new AlertDialog.Builder(this)
-                    .setTitle("选择登录站点")
-                    .setItems(labels, (dialog, which) -> {
-                        ForumConnector connector = connectors.get(which);
-                        OriginalWebActivity.open(this, connector.loginUrl(), connector.name() + " 登录");
-                    })
-                    .show();
-        }
-    }
-
-    private List<ForumConnector> loginConnectorsForGroup() {
-        Set<String> siteIds = new HashSet<>();
-        List<ForumConnector> connectors = new ArrayList<>();
-        for (BoardDefinition board : selectedGroup.boards) {
-            if (siteIds.add(board.siteId)) {
-                connectors.add(ConnectorRegistry.byId(board.siteId));
-            }
-        }
-        return connectors;
     }
 
     private String targetKey() {

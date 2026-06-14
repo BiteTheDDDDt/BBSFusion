@@ -9,7 +9,7 @@ import static org.junit.Assert.assertEquals;
 
 public final class FeedOrderingTest {
     @Test
-    public void ordersTopicsByLastReplyTimeDescending() {
+    public void balancesSourcesWithinTheSameTimelineWindow() {
         long base = 1_780_920_000_000L;
         List<TopicSummary> ordered = FeedOrdering.order(Arrays.asList(
                 topic("nga", "nga-1", base + 230_000L),
@@ -20,8 +20,8 @@ public final class FeedOrderingTest {
 
         assertEquals("s1-1", ordered.get(0).title);
         assertEquals("nga-1", ordered.get(1).title);
-        assertEquals("nga-2", ordered.get(2).title);
-        assertEquals("s1-2", ordered.get(3).title);
+        assertEquals("s1-2", ordered.get(2).title);
+        assertEquals("nga-2", ordered.get(3).title);
     }
 
     @Test
@@ -53,6 +53,42 @@ public final class FeedOrderingTest {
         assertEquals("nga-1", ordered.get(0).title);
         assertEquals("s1-1", ordered.get(1).title);
         assertEquals("nga-2", ordered.get(2).title);
+        assertEquals("s1-2", ordered.get(3).title);
+    }
+
+    @Test
+    public void interleavesNearbyMinutesWithinTheSameTimelineWindow() {
+        long base = 1_780_920_000_000L;
+        List<TopicSummary> ordered = FeedOrdering.order(Arrays.asList(
+                topic("nga", "nga-1", base + 9 * 60_000L),
+                topic("nga", "nga-2", base + 8 * 60_000L),
+                topic("nga", "nga-3", base + 7 * 60_000L),
+                topic("s1", "s1-1", base + 6 * 60_000L),
+                topic("s1", "s1-2", base + 5 * 60_000L),
+                topic("s1", "s1-3", base + 4 * 60_000L)
+        ));
+
+        assertEquals("nga-1", ordered.get(0).title);
+        assertEquals("s1-1", ordered.get(1).title);
+        assertEquals("nga-2", ordered.get(2).title);
+        assertEquals("s1-2", ordered.get(3).title);
+        assertEquals("nga-3", ordered.get(4).title);
+        assertEquals("s1-3", ordered.get(5).title);
+    }
+
+    @Test
+    public void keepsDistantTimelineWindowsSeparate() {
+        long base = 1_780_920_000_000L;
+        List<TopicSummary> ordered = FeedOrdering.order(Arrays.asList(
+                topic("nga", "nga-1", base + 30 * 60_000L),
+                topic("nga", "nga-2", base + 29 * 60_000L),
+                topic("s1", "s1-1", base + 12 * 60_000L),
+                topic("s1", "s1-2", base + 11 * 60_000L)
+        ));
+
+        assertEquals("nga-1", ordered.get(0).title);
+        assertEquals("nga-2", ordered.get(1).title);
+        assertEquals("s1-1", ordered.get(2).title);
         assertEquals("s1-2", ordered.get(3).title);
     }
 

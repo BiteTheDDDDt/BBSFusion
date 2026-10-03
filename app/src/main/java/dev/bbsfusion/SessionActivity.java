@@ -16,6 +16,8 @@ import android.widget.Toast;
 
 import dev.bbsfusion.core.ConnectorRegistry;
 import dev.bbsfusion.core.ForumConnector;
+import dev.bbsfusion.core.SessionCookiePolicy;
+import dev.bbsfusion.ui.WindowInsetsHelper;
 
 import java.net.URI;
 import java.util.ArrayList;
@@ -26,6 +28,7 @@ import java.util.Set;
 
 public final class SessionActivity extends Activity {
     private final List<SessionRow> rows = new ArrayList<>();
+    private final Set<String> clearingSites = new LinkedHashSet<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -46,6 +49,7 @@ public final class SessionActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.rgb(247, 247, 244));
+        WindowInsetsHelper.apply(root);
 
         LinearLayout toolbar = new LinearLayout(this);
         toolbar.setOrientation(LinearLayout.HORIZONTAL);
@@ -119,11 +123,7 @@ public final class SessionActivity extends Activity {
         actions.setGravity(Gravity.CENTER_VERTICAL);
 
         row.loginButton = makeButton("登录");
-        row.loginButton.setOnClickListener(v -> OriginalWebActivity.open(
-                this,
-                row.connector.loginUrl(),
-                row.connector.name() + " 登录"
-        ));
+        row.loginButton.setOnClickListener(v -> OriginalWebActivity.openLogin(this, row.connector));
 
         row.clearButton = makeButton("清除会话");
         row.clearButton.setOnClickListener(v -> confirmClear(row.connector));
@@ -146,86 +146,81 @@ public final class SessionActivity extends Activity {
     private void confirmClear(ForumConnector connector) {
         new AlertDialog.Builder(this)
                 .setTitle("清除 " + connector.name() + " 会话")
-                .setMessage("会清除本机保存的该论坛 Cookie。")
+                .setMessage("会清除本机保存的该论坛已知域名和路径下的 Cookie，并检查清除结果。")
                 .setNegativeButton("取消", null)
-                .setPositiveButton("清除", (dialog, which) -> {
-                    int removed = clearCookies(connector);
-                    refreshRows();
-                    Toast.makeText(
-                            this,
-                            removed > 0 ? "已清除 " + connector.name() + " 会话" : "没有可清除的会话",
-                            Toast.LENGTH_SHORT
-                    ).show();
-                })
+                .setPositiveButton("清除", (dialog, which) -> clearCookies(connector))
                 .show();
     }
 
     private void refreshRows() {
         CookieManager.getInstance().flush();
         for (SessionRow row : rows) {
+            boolean clearing = clearingSites.contains(row.connector.id());
             int count = cookieNames(row.connector).size();
             boolean hasCookies = count > 0;
-            row.status.setText(hasCookies
+            row.status.setText(clearing ? "正在清除并检查会话..." : hasCookies
                     ? "检测到本地 Cookie：" + count + " 项"
                     : "未检测到本地 Cookie");
             row.loginButton.setText(hasCookies ? "登录/切换" : "登录");
-            row.clearButton.setEnabled(hasCookies);
+            row.loginButton.setEnabled(!clearing);
+            row.clearButton.setEnabled(hasCookies && !clearing);
         }
     }
 
-    private int clearCookies(ForumConnector connector) {
+    private void clearCookies(ForumConnector connector) {
+        if (!clearingSites.add(connector.id())) {
+            return;
+        }
         Set<String> names = cookieNames(connector);
         if (names.isEmpty()) {
-            return 0;
+            clearingSites.remove(connector.id());
+            refreshRows();
+            Toast.makeText(this, "没有可清除的会话", Toast.LENGTH_SHORT).show();
+            return;
         }
-
+        List<CookieDeletion> deletions = new ArrayList<>();
         CookieManager cookieManager = CookieManager.getInstance();
         for (String url : candidateUrls(connector)) {
             String domain = hostFromUrl(url);
+            Set<String> domains = domainCandidates(domain);
+            domains.add("");
             for (String name : names) {
-                expireCookie(cookieManager, url, name, "");
-                for (String candidate : domainCandidates(domain)) {
-                    expireCookie(cookieManager, url, name, candidate);
+                for (String path : SessionCookiePolicy.pathsFor(url)) {
+                    for (String candidate : domains) {
+                        String expired = SessionCookiePolicy.expiredCookie(name, path, candidate);
+                        if (!expired.isEmpty()) {
+                            deletions.add(new CookieDeletion(url, expired));
+                        }
+                    }
                 }
             }
         }
-        cookieManager.flush();
-        return names.size();
-    }
-
-    private static void expireCookie(
-            CookieManager cookieManager,
-            String url,
-            String name,
-            String domain
-    ) {
-        if (name.isEmpty()) {
-            return;
+        refreshRows();
+        int[] pending = {deletions.size()};
+        for (CookieDeletion deletion : deletions) {
+            cookieManager.setCookie(deletion.url, deletion.value, ignored -> {
+                if (--pending[0] == 0) {
+                    // A successful setCookie only means this candidate was accepted, not that
+                    // the original cookie had that scope. Read the actual remaining cookies.
+                    cookieManager.flush();
+                    int remaining = cookieNames(connector).size();
+                    clearingSites.remove(connector.id());
+                    if (!isFinishing() && !isDestroyed()) {
+                        refreshRows();
+                        Toast.makeText(this, remaining == 0
+                                ? "已清除 " + connector.name() + " 已知会话"
+                                : "仍检测到 " + remaining + " 项 Cookie，请到原站退出登录", Toast.LENGTH_LONG).show();
+                    }
+                }
+            });
         }
-        String cookie = name + "=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
-        if (!domain.isEmpty()) {
-            cookie += "; Domain=" + domain;
-        }
-        cookieManager.setCookie(url, cookie);
     }
 
     private Set<String> cookieNames(ForumConnector connector) {
         Set<String> names = new LinkedHashSet<>();
         CookieManager cookieManager = CookieManager.getInstance();
         for (String url : candidateUrls(connector)) {
-            String cookies = cookieManager.getCookie(url);
-            if (cookies == null || cookies.trim().isEmpty()) {
-                continue;
-            }
-            String[] parts = cookies.split(";");
-            for (String part : parts) {
-                int equals = part.indexOf('=');
-                String name = equals >= 0 ? part.substring(0, equals) : part;
-                name = name.trim();
-                if (!name.isEmpty()) {
-                    names.add(name);
-                }
-            }
+            names.addAll(SessionCookiePolicy.names(cookieManager.getCookie(url)));
         }
         return names;
     }
@@ -276,6 +271,8 @@ public final class SessionActivity extends Activity {
         if ("s1".equals(id)) {
             addUrl(urls, "https://stage1st.com/");
             addUrl(urls, "https://www.stage1st.com/");
+            addUrl(urls, "https://stage1st.com/2b/");
+            addUrl(urls, "https://www.stage1st.com/2b/");
         } else if ("nga".equals(id)) {
             addUrl(urls, "https://bbs.nga.cn/");
             addUrl(urls, "https://ngabbs.com/");
@@ -284,8 +281,12 @@ public final class SessionActivity extends Activity {
         } else if ("v2ex".equals(id)) {
             addUrl(urls, "https://v2ex.com/");
             addUrl(urls, "https://www.v2ex.com/");
+            addUrl(urls, "https://v2ex.com/api/topics/");
+            addUrl(urls, "https://v2ex.com/api/replies/");
         } else if ("linuxdo".equals(id)) {
             addUrl(urls, "https://linux.do/");
+            addUrl(urls, "https://linux.do/session/");
+            addUrl(urls, "https://linux.do/t/");
         }
         return new ArrayList<>(urls);
     }
@@ -341,6 +342,16 @@ public final class SessionActivity extends Activity {
 
         SessionRow(ForumConnector connector) {
             this.connector = connector;
+        }
+    }
+
+    private static final class CookieDeletion {
+        final String url;
+        final String value;
+
+        CookieDeletion(String url, String value) {
+            this.url = url;
+            this.value = value;
         }
     }
 }

@@ -13,27 +13,39 @@ import android.os.Looper;
 import android.text.Spannable;
 import android.text.SpannableStringBuilder;
 import android.text.style.ImageSpan;
+import android.util.LruCache;
 import android.webkit.CookieManager;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.AbsListView;
+import android.widget.BaseAdapter;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
-import android.widget.ScrollView;
+import android.widget.ListView;
 import android.widget.TextView;
 
 import dev.bbsfusion.core.ConnectorRegistry;
 import dev.bbsfusion.core.ForumConnector;
 import dev.bbsfusion.core.Post;
 import dev.bbsfusion.core.TopicDetail;
+import dev.bbsfusion.core.ImageRequestPolicy;
+import dev.bbsfusion.ui.WindowInsetsHelper;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
-import java.net.URL;
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -47,18 +59,35 @@ public final class TopicActivity extends Activity {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final ExecutorService imageExecutor = Executors.newFixedThreadPool(4);
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final Map<String, FutureTask<Bitmap>> imageRequests = new ConcurrentHashMap<>();
+    private final Set<HttpURLConnection> imageConnections = ConcurrentHashMap.newKeySet();
+    private BindingToken bindingToken;
 
-    private LinearLayout postsContainer;
+    private final List<Post> posts = new ArrayList<>();
+    private final LruCache<String, Bitmap> imageCache = new LruCache<String, Bitmap>(16 * 1024 * 1024) {
+        @Override protected int sizeOf(String key, Bitmap bitmap) {
+            return bitmap.getAllocationByteCount();
+        }
+    };
+    private ListView postsList;
+    private BaseAdapter postAdapter;
     private TextView titleView;
     private TextView statusView;
     private Button loadMoreButton;
-    private ScrollView scrollView;
+    private Button retryButton;
+    private volatile boolean destroyed;
+    private boolean pageFailed;
+    private boolean userScrolling;
+    private boolean restoringPosition;
+    private int requestGeneration;
+    private volatile int imageGeneration;
 
     private ForumConnector connector;
     private String topicUrl;
     private String initialTitle;
     private int loadedPage = 1;
-    private int displayedPostCount;
+    private int failedPage = 1;
+    private boolean failedAppend;
     private boolean isLoadingPage;
     private boolean hasMorePages;
 
@@ -73,20 +102,89 @@ public final class TopicActivity extends Activity {
         connector = ConnectorRegistry.byId(siteId == null ? "s1" : siteId);
 
         setContentView(createContentView());
-        loadTopic();
+        Object retained = getLastNonConfigurationInstance();
+        if (retained instanceof ReadingState) {
+            ReadingState state = (ReadingState) retained;
+            posts.addAll(state.posts);
+            loadedPage = state.page;
+            hasMorePages = state.hasMore;
+            pageFailed = state.retryNeeded;
+            failedPage = state.retryPage;
+            failedAppend = state.retryAppend;
+            retryButton.setText(pageFailed ? "重试" : "刷新");
+            titleView.setText(state.title);
+            postAdapter.notifyDataSetChanged();
+            updateLoadMoreButton();
+            restoringPosition = true;
+            postsList.setSelectionFromTop(state.position, state.offset);
+            postsList.post(() -> restoringPosition = false);
+            statusView.setText(pageFailed
+                    ? "已恢复阅读位置，上次加载未完成，点击重试。"
+                    : "已恢复阅读位置，共 " + posts.size() + " 段内容。");
+        } else {
+            loadTopic();
+        }
     }
 
     @Override
     protected void onDestroy() {
-        super.onDestroy();
+        destroyed = true;
+        requestGeneration++;
+        mainHandler.removeCallbacksAndMessages(null);
         executor.shutdownNow();
         imageExecutor.shutdownNow();
+        for (FutureTask<Bitmap> request : imageRequests.values()) { request.cancel(true); }
+        for (HttpURLConnection connection : imageConnections) { connection.disconnect(); }
+        imageCache.evictAll();
+        super.onDestroy();
+    }
+
+    @Override
+    public Object onRetainNonConfigurationInstance() {
+        View first = postsList.getChildAt(0);
+        return new ReadingState(posts, loadedPage, hasMorePages, titleView.getText().toString(),
+                postsList.getFirstVisiblePosition(), first == null ? 0 : first.getTop(),
+                pageFailed || isLoadingPage, failedPage, failedAppend);
+    }
+
+    private static final class ReadingState {
+        final List<Post> posts;
+        final int page;
+        final boolean hasMore;
+        final String title;
+        final int position;
+        final int offset;
+        final boolean retryNeeded;
+        final int retryPage;
+        final boolean retryAppend;
+
+        ReadingState(List<Post> posts, int page, boolean hasMore, String title, int position, int offset,
+                boolean retryNeeded, int retryPage, boolean retryAppend) {
+            this.posts = new ArrayList<>(posts);
+            this.page = page;
+            this.hasMore = hasMore;
+            this.title = title;
+            this.position = position;
+            this.offset = offset;
+            this.retryNeeded = retryNeeded;
+            this.retryPage = retryPage;
+            this.retryAppend = retryAppend;
+        }
+    }
+
+    private static final class BindingToken {
+        volatile boolean active = true;
+    }
+
+    private boolean active(BindingToken token) {
+        return !destroyed && (token == null || token.active);
     }
 
     private View createContentView() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(Color.rgb(247, 247, 244));
+        WindowInsetsHelper.apply(root);
 
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.HORIZONTAL);
@@ -97,9 +195,18 @@ public final class TopicActivity extends Activity {
         back.setOnClickListener(v -> finish());
         Button open = makeButton("原站");
         open.setOnClickListener(v -> OriginalWebActivity.open(this, topicUrl, connector.name()));
+        retryButton = makeButton("刷新");
+        retryButton.setOnClickListener(v -> {
+            if (pageFailed) {
+                loadTopicPage(failedPage, failedAppend);
+            } else {
+                loadTopic();
+            }
+        });
 
         bar.addView(back, new LinearLayout.LayoutParams(dp(88), dp(44)));
         bar.addView(open, new LinearLayout.LayoutParams(dp(88), dp(44)));
+        bar.addView(retryButton, new LinearLayout.LayoutParams(dp(88), dp(44)));
         root.addView(bar);
 
         titleView = new TextView(this);
@@ -117,16 +224,33 @@ public final class TopicActivity extends Activity {
         statusView.setPadding(dp(16), 0, dp(16), dp(12));
         root.addView(statusView);
 
-        scrollView = new ScrollView(this);
-        scrollView.setOnScrollChangeListener((v, scrollX, scrollY, oldScrollX, oldScrollY) ->
-                maybeAutoLoadMore()
-        );
-        postsContainer = new LinearLayout(this);
-        postsContainer.setOrientation(LinearLayout.VERTICAL);
-        postsContainer.setPadding(0, 0, 0, dp(24));
-        scrollView.addView(postsContainer);
+        postsList = new ListView(this);
+        postsList.setDividerHeight(1);
+        postsList.setPadding(0, 0, 0, dp(24));
+        postAdapter = new BaseAdapter() {
+            @Override public int getCount() { return posts.size(); }
+            @Override public Post getItem(int position) { return posts.get(position); }
+            @Override public long getItemId(int position) { return position; }
+            @Override public View getView(int position, View convertView, ViewGroup parent) {
+                return createPostView(getItem(position), position + 1, convertView);
+            }
+        };
+        postsList.setAdapter(postAdapter);
+        postsList.setRecyclerListener(view -> {
+            if (view.getTag() instanceof BindingToken) { ((BindingToken) view.getTag()).active = false; }
+        });
+        postsList.setOnScrollListener(new AbsListView.OnScrollListener() {
+            @Override public void onScrollStateChanged(AbsListView view, int state) {
+                userScrolling = state != SCROLL_STATE_IDLE;
+            }
+            @Override public void onScroll(AbsListView view, int first, int visible, int total) {
+                if (userScrolling && !restoringPosition && total > 0 && first + visible >= total - 2) {
+                    maybeAutoLoadMore();
+                }
+            }
+        });
 
-        root.addView(scrollView, new LinearLayout.LayoutParams(
+        root.addView(postsList, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 0,
                 1
@@ -135,6 +259,7 @@ public final class TopicActivity extends Activity {
         loadMoreButton = makeButton("加载更多");
         loadMoreButton.setVisibility(View.GONE);
         loadMoreButton.setEnabled(false);
+        loadMoreButton.setOnClickListener(v -> loadNextPage());
         root.addView(loadMoreButton, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 dp(44)
@@ -144,23 +269,32 @@ public final class TopicActivity extends Activity {
     }
 
     private void loadTopic() {
-        loadedPage = 1;
-        hasMorePages = false;
+        if (isLoadingPage || destroyed) { return; }
+        imageGeneration++;
+        imageCache.evictAll();
         loadTopicPage(1, false);
     }
 
     private void loadTopicPage(int page, boolean append) {
-        if (isLoadingPage) {
+        if (destroyed || isLoadingPage) {
             return;
         }
         isLoadingPage = true;
+        pageFailed = false;
+        failedPage = page;
+        failedAppend = append;
+        int generation = ++requestGeneration;
+        retryButton.setEnabled(false);
         updateLoadMoreButton();
         statusView.setText("正在加载 " + connector.name() + " 帖子...");
         executor.execute(() -> {
             try {
                 TopicDetail detail = connector.fetchTopicPage(topicUrl, page);
                 mainHandler.post(() -> {
+                    if (destroyed || generation != requestGeneration) { return; }
                     isLoadingPage = false;
+                    retryButton.setEnabled(true);
+                    retryButton.setText("刷新");
                     if (append) {
                         appendTopic(detail);
                     } else {
@@ -169,10 +303,15 @@ public final class TopicActivity extends Activity {
                 });
             } catch (Exception error) {
                 mainHandler.post(() -> {
+                    if (destroyed || generation != requestGeneration) { return; }
                     isLoadingPage = false;
+                    pageFailed = true;
+                    failedPage = page;
+                    failedAppend = append;
+                    retryButton.setEnabled(true);
+                    retryButton.setText("重试");
                     updateLoadMoreButton();
                     statusView.setText("加载失败：" + error.getMessage());
-                    addPostText("提示", "可以点“原站”用 WebView 打开。");
                 });
             }
         });
@@ -180,59 +319,52 @@ public final class TopicActivity extends Activity {
 
     private void renderTopic(TopicDetail detail) {
         titleView.setText(detail.title);
-        postsContainer.removeAllViews();
-        displayedPostCount = 0;
-        for (Post post : detail.posts) {
-            addPostView(post, ++displayedPostCount);
-        }
+        posts.clear();
+        posts.addAll(detail.posts);
+        postAdapter.notifyDataSetChanged();
         loadedPage = detail.pageNumber;
         hasMorePages = detail.hasMore;
         updateLoadMoreButton();
         statusView.setText("已加载 " + detail.posts.size() + " 段内容。");
-        mainHandler.post(this::maybeAutoLoadMore);
+        postsList.setSelection(0);
     }
 
     private void appendTopic(TopicDetail detail) {
-        for (Post post : detail.posts) {
-            addPostView(post, ++displayedPostCount);
-        }
+        posts.addAll(detail.posts);
+        postAdapter.notifyDataSetChanged();
         loadedPage = detail.pageNumber;
         hasMorePages = detail.hasMore && !detail.posts.isEmpty();
         updateLoadMoreButton();
         statusView.setText("已加载到第 " + loadedPage + " 页，新增 " + detail.posts.size() + " 段内容。");
-        mainHandler.post(this::maybeAutoLoadMore);
     }
 
     private void updateLoadMoreButton() {
         if (loadMoreButton == null) {
             return;
         }
-        loadMoreButton.setVisibility(hasMorePages && isLoadingPage ? View.VISIBLE : View.GONE);
-        loadMoreButton.setEnabled(false);
-        loadMoreButton.setText("正在加载更多...");
+        loadMoreButton.setVisibility(hasMorePages ? View.VISIBLE : View.GONE);
+        loadMoreButton.setEnabled(!isLoadingPage);
+        loadMoreButton.setText(isLoadingPage ? "正在加载更多..." : pageFailed ? "重试加载" : "加载更多");
     }
 
     private void maybeAutoLoadMore() {
-        if (!hasMorePages || isLoadingPage || scrollView == null || postsContainer == null) {
-            return;
-        }
-        View child = scrollView.getChildAt(0);
-        if (child == null) {
-            return;
-        }
-        int visibleBottom = scrollView.getScrollY() + scrollView.getHeight();
-        int remaining = child.getBottom() - visibleBottom;
-        if (remaining <= dp(280)) {
-            loadTopicPage(loadedPage + 1, true);
+        if (!destroyed && !pageFailed && hasMorePages && !isLoadingPage) {
+            loadNextPage();
         }
     }
 
-    private void addPostText(String author, String content) {
-        addPostView(new Post(author, content), 0);
+    private void loadNextPage() {
+        if (hasMorePages && !isLoadingPage) {
+            loadTopicPage(pageFailed ? failedPage : loadedPage + 1, pageFailed ? failedAppend : true);
+        }
     }
 
-    private void addPostView(Post post, int floorNumber) {
-        LinearLayout row = new LinearLayout(this);
+    private View createPostView(Post post, int floorNumber, View recycled) {
+        LinearLayout row = recycled instanceof LinearLayout ? (LinearLayout) recycled : new LinearLayout(this);
+        if (row.getTag() instanceof BindingToken) { ((BindingToken) row.getTag()).active = false; }
+        bindingToken = new BindingToken();
+        row.setTag(bindingToken);
+        row.removeAllViews();
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setPadding(dp(16), dp(14), dp(16), dp(12));
 
@@ -326,14 +458,8 @@ public final class TopicActivity extends Activity {
                 LinearLayout.LayoutParams.WRAP_CONTENT,
                 1
         ));
-        postsContainer.addView(row);
-
-        View divider = new View(this);
-        divider.setBackgroundColor(Color.rgb(216, 214, 207));
-        postsContainer.addView(divider, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                1
-        ));
+        bindingToken = null;
+        return row;
     }
 
     private String floorLabel(int floorNumber) {
@@ -416,18 +542,29 @@ public final class TopicActivity extends Activity {
 
     private CharSequence spannablePostContent(Post post, TextView contentView) {
         SpannableStringBuilder builder = new SpannableStringBuilder(post.content);
-        int searchStart = 0;
+        Map<String, List<String>> sources = new HashMap<>();
         for (Post.InlineImage inlineImage : post.inlineImages) {
             if (!isHttpUrl(inlineImage.sourceUrl) || inlineImage.label.isEmpty()) {
                 continue;
             }
-            int start = builder.toString().indexOf(inlineImage.label, searchStart);
-            if (start < 0) {
-                continue;
+            List<String> urls = sources.get(inlineImage.label);
+            if (urls == null) {
+                urls = new ArrayList<>();
+                sources.put(inlineImage.label, urls);
             }
-            int end = start + inlineImage.label.length();
-            searchStart = end;
-            loadInlineImage(contentView, builder, inlineImage.sourceUrl, start, end);
+            urls.add(inlineImage.sourceUrl);
+        }
+        for (Map.Entry<String, List<String>> entry : sources.entrySet()) {
+            int searchStart = 0;
+            int occurrence = 0;
+            int start;
+            while ((start = post.content.indexOf(entry.getKey(), searchStart)) >= 0) {
+                int end = start + entry.getKey().length();
+                List<String> urls = entry.getValue();
+                String url = urls.get(Math.min(occurrence++, urls.size() - 1));
+                loadInlineImage(contentView, builder, url, start, end);
+                searchStart = end;
+            }
         }
         return builder;
     }
@@ -439,12 +576,16 @@ public final class TopicActivity extends Activity {
             int start,
             int end
     ) {
+        if (destroyed) { return; }
+        BindingToken token = bindingToken;
         imageExecutor.execute(() -> {
+            if (!active(token) || Thread.currentThread().isInterrupted()) { return; }
             Bitmap bitmap = fetchRemoteImage(imageUrl, dp(96), dp(96));
             if (bitmap == null) {
                 return;
             }
             mainHandler.post(() -> {
+                if (!active(token)) { return; }
                 BitmapDrawable drawable = new BitmapDrawable(getResources(), scaledInlineBitmap(bitmap));
                 drawable.setBounds(0, 0, drawable.getBitmap().getWidth(), drawable.getBitmap().getHeight());
                 builder.setSpan(
@@ -517,14 +658,18 @@ public final class TopicActivity extends Activity {
             boolean resizeToBitmap,
             TextView stateView
     ) {
+        if (destroyed) { return; }
+        BindingToken token = bindingToken;
         imageView.setTag(imageUrl);
         imageExecutor.execute(() -> {
+            if (!active(token) || Thread.currentThread().isInterrupted()) { return; }
             Bitmap bitmap = fetchRemoteImage(imageUrl, targetWidth, maxHeight);
             if (bitmap == null) {
                 mainHandler.post(() -> updateImageLoadState(imageView, imageUrl, stateView, false));
                 return;
             }
             mainHandler.post(() -> {
+                if (!active(token)) { return; }
                 Object tag = imageView.getTag();
                 if (!(tag instanceof String) || !imageUrl.equals(tag)) {
                     return;
@@ -544,7 +689,7 @@ public final class TopicActivity extends Activity {
             TextView stateView,
             boolean loaded
     ) {
-        if (stateView == null) {
+        if (destroyed || stateView == null) {
             return;
         }
         Object tag = imageView.getTag();
@@ -560,37 +705,74 @@ public final class TopicActivity extends Activity {
     }
 
     private Bitmap fetchRemoteImage(String imageUrl, int targetWidth, int targetHeight) {
+        String cacheKey = imageGeneration + "|" + imageUrl + "|" + targetWidth + "x" + targetHeight;
+        Bitmap cached = imageCache.get(cacheKey);
+        if (cached != null) { return cached; }
+        FutureTask<Bitmap> request = new FutureTask<>(() -> downloadRemoteImage(imageUrl, targetWidth, targetHeight, cacheKey));
+        FutureTask<Bitmap> existing = imageRequests.putIfAbsent(cacheKey, request);
+        boolean owner = existing == null;
+        if (!owner) { request = existing; }
+        try {
+            if (owner) { request.run(); }
+            return request.get();
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (Exception ignored) {
+            return null;
+        } finally {
+            if (owner) { imageRequests.remove(cacheKey, request); }
+        }
+    }
+
+    private Bitmap downloadRemoteImage(String imageUrl, int targetWidth, int targetHeight, String cacheKey) {
         HttpURLConnection connection = null;
         try {
-            URL url = new URL(imageUrl);
-            connection = (HttpURLConnection) url.openConnection();
-            connection.setInstanceFollowRedirects(true);
-            connection.setConnectTimeout(8000);
-            connection.setReadTimeout(8000);
-            connection.setRequestProperty(
-                    "User-Agent",
-                    "Mozilla/5.0 (Linux; Android 15; Mobile) AppleWebKit/537.36 "
-                            + "(KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36 BBSFusion/0.1"
-            );
-            connection.setRequestProperty("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8");
-            if (topicUrl != null && !topicUrl.isEmpty()) {
-                connection.setRequestProperty("Referer", topicUrl);
-            }
-            String cookie = cookiesFor(imageUrl);
-            if (!cookie.isEmpty()) {
-                connection.setRequestProperty("Cookie", cookie);
-            }
-            try (InputStream input = connection.getInputStream()) {
-                byte[] data = readImageBytes(input);
-                if (data == null || data.length == 0) {
-                    return null;
+            URI target = ImageRequestPolicy.parse(imageUrl);
+            for (int hop = 0; hop <= 5; hop++) {
+                if (destroyed || Thread.currentThread().isInterrupted()) { return null; }
+                connection = (HttpURLConnection) target.toURL().openConnection();
+                imageConnections.add(connection);
+                connection.setInstanceFollowRedirects(false);
+                connection.setConnectTimeout(8000);
+                connection.setReadTimeout(8000);
+                connection.setRequestProperty(
+                        "User-Agent",
+                        "Mozilla/5.0 (Linux; Android 15; Mobile) AppleWebKit/537.36 "
+                                + "(KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36 BBSFusion/0.1"
+                );
+                connection.setRequestProperty("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8");
+                String referrer = ImageRequestPolicy.referrer(topicUrl, target);
+                if (!referrer.isEmpty()) { connection.setRequestProperty("Referer", referrer); }
+                String cookie = ImageRequestPolicy.cookiesFor(target, CookieManager.getInstance()::getCookie);
+                if (!cookie.isEmpty()) {
+                    connection.setRequestProperty("Cookie", cookie);
                 }
-                return decodeSampledBitmap(data, targetWidth, targetHeight);
+                int response = connection.getResponseCode();
+                if (response == 301 || response == 302 || response == 303 || response == 307 || response == 308) {
+                    target = ImageRequestPolicy.redirect(target, connection.getHeaderField("Location"));
+                    imageConnections.remove(connection);
+                    connection.disconnect();
+                    connection = null;
+                    continue;
+                }
+                if (response < 200 || response >= 300) { return null; }
+                try (InputStream input = connection.getInputStream()) {
+                    byte[] data = readImageBytes(input);
+                    if (data == null || data.length == 0) {
+                        return null;
+                    }
+                    Bitmap bitmap = decodeSampledBitmap(data, targetWidth, targetHeight);
+                    if (bitmap != null && !destroyed) { imageCache.put(cacheKey, bitmap); }
+                    return bitmap;
+                }
             }
+            return null;
         } catch (Exception ignored) {
             return null;
         } finally {
             if (connection != null) {
+                imageConnections.remove(connection);
                 connection.disconnect();
             }
         }
@@ -602,6 +784,7 @@ public final class TopicActivity extends Activity {
         int total = 0;
         int read;
         while ((read = input.read(buffer)) != -1) {
+            if (destroyed || Thread.currentThread().isInterrupted()) { return null; }
             total += read;
             if (total > MAX_IMAGE_BYTES) {
                 return null;
@@ -688,28 +871,6 @@ public final class TopicActivity extends Activity {
     private int contentImageWidth() {
         int screenWidth = getResources().getDisplayMetrics().widthPixels;
         return Math.max(dp(160), screenWidth - dp(16 + 42 + 12 + 16));
-    }
-
-    private String cookiesFor(String imageUrl) {
-        CookieManager cookieManager = CookieManager.getInstance();
-        StringBuilder builder = new StringBuilder();
-        appendCookie(builder, cookieManager.getCookie(imageUrl));
-        appendCookie(builder, cookieManager.getCookie("https://stage1st.com/2b/"));
-        appendCookie(builder, cookieManager.getCookie("https://bbs.nga.cn/"));
-        appendCookie(builder, cookieManager.getCookie("https://ngabbs.com/"));
-        appendCookie(builder, cookieManager.getCookie("https://www.v2ex.com/"));
-        appendCookie(builder, cookieManager.getCookie("https://linux.do/"));
-        return builder.toString();
-    }
-
-    private void appendCookie(StringBuilder builder, String cookie) {
-        if (cookie == null || cookie.trim().isEmpty()) {
-            return;
-        }
-        if (builder.length() > 0) {
-            builder.append("; ");
-        }
-        builder.append(cookie.trim());
     }
 
     private boolean isHttpUrl(String value) {

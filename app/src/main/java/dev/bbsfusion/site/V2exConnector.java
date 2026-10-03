@@ -120,7 +120,10 @@ public final class V2exConnector implements ForumConnector {
         JSONArray topicArray = NetworkClient.getJsonArray(TOPIC_API + topicId, HOME_URL);
         JSONObject topic = topicArray.length() == 0 ? null : topicArray.optJSONObject(0);
         JSONArray replies = NetworkClient.getJsonArray(REPLIES_API + topicId, HOME_URL);
+        return parseTopic(topic, replies, url);
+    }
 
+    static TopicDetail parseTopic(JSONObject topic, JSONArray replies, String url) {
         List<Post> posts = new ArrayList<>();
         if (topic != null) {
             ParsedContent content = parsedContent(
@@ -141,7 +144,7 @@ public final class V2exConnector implements ForumConnector {
             }
         }
 
-        for (int i = 0; i < replies.length() && posts.size() < 80; i++) {
+        for (int i = 0; i < replies.length(); i++) {
             JSONObject reply = replies.optJSONObject(i);
             if (reply == null) {
                 continue;

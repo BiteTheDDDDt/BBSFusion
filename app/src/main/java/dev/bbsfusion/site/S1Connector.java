@@ -96,36 +96,32 @@ public final class S1Connector implements ForumConnector {
         return ForumHtmlParsers.extractTopic(document, pageUrl, page);
     }
 
-    private static String pagedTopicUrl(String url, int page) {
-        if (page <= 1 || url == null || url.isEmpty()) {
-            return url;
-        }
-        Matcher matcher = THREAD_PAGE_URL.matcher(url);
-        if (matcher.find()) {
-            return matcher.replaceFirst(Matcher.quoteReplacement(
-                    matcher.group(1) + page + matcher.group(2)
-            ));
-        }
-        if (url.contains("page=")) {
-            return url.replaceFirst("([?&]page=)\\d+", "$1" + page);
-        }
-        return url + (url.contains("?") ? "&" : "?") + "page=" + page;
+    static String pagedTopicUrl(String url, int page) {
+        return pagedUrl(url, page, THREAD_PAGE_URL);
     }
 
     static String pagedBoardUrl(String url, int page) {
-        if (page <= 1 || url == null || url.isEmpty()) {
+        return pagedUrl(url, page, BOARD_PAGE_URL);
+    }
+
+    private static String pagedUrl(String url, int page, Pattern pagePattern) {
+        if (url == null || url.isEmpty()) {
             return url;
         }
-        Matcher matcher = BOARD_PAGE_URL.matcher(url);
+        int fragment = url.indexOf('#');
+        String base = fragment >= 0 ? url.substring(0, fragment) : url;
+        int pageNumber = Math.max(1, page);
+        Matcher matcher = pagePattern.matcher(base);
         if (matcher.find()) {
             return matcher.replaceFirst(Matcher.quoteReplacement(
-                    matcher.group(1) + page + matcher.group(2)
+                    matcher.group(1) + pageNumber + matcher.group(2)
             ));
         }
-        if (url.contains("page=")) {
-            return url.replaceFirst("([?&]page=)\\d+", "$1" + page);
+        Matcher queryPage = Pattern.compile("([?&])page=[^&]*").matcher(base);
+        if (queryPage.find()) {
+            return queryPage.replaceFirst(Matcher.quoteReplacement(queryPage.group(1) + "page=" + pageNumber));
         }
-        return url + (url.contains("?") ? "&" : "?") + "page=" + page;
+        return pageNumber <= 1 ? base : base + (base.contains("?") ? "&" : "?") + "page=" + pageNumber;
     }
 
 }

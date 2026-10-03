@@ -28,8 +28,8 @@ android {
         applicationId = "dev.bbsfusion"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.4"
+        versionCode = 7
+        versionName = "0.5"
 
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
     }
@@ -40,8 +40,8 @@ android {
     }
 
     lint {
-        checkReleaseBuilds = false
-        abortOnError = false
+        checkReleaseBuilds = true
+        abortOnError = true
     }
 
     signingConfigs {

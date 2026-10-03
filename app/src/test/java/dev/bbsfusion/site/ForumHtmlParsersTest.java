@@ -13,9 +13,132 @@ import java.time.ZoneId;
 import java.util.List;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public final class ForumHtmlParsersTest {
+    @Test
+    public void malformedDatesAreUnknownInsteadOfFailingTheEntirePage() {
+        assertEquals(0L, ForumHtmlParsers.parseTimeMillis("2026-13-40 25:61"));
+        assertEquals(0L, ForumHtmlParsers.parseTimeMillis("今天 25:99"));
+        assertEquals(0L, ForumHtmlParsers.parseTimeMillis("999999999999999999999999秒前"));
+    }
+
+    @Test
+    public void retainsEveryStructuredPostWhenAPageHasMoreThanForty() {
+        StringBuilder html = new StringBuilder();
+        for (int i = 1; i <= 65; i++) {
+            html.append(structuredPost(String.valueOf(i), "user" + i, "回复 " + i));
+        }
+        TopicDetail detail = ForumHtmlParsers.extractTopic(
+                Jsoup.parse(html.toString()), "https://stage1st.com/2b/thread-1-1-1.html"
+        );
+        assertEquals(65, detail.posts.size());
+        assertEquals("user65", detail.posts.get(64).author);
+        assertEquals("回复 65", detail.posts.get(64).content);
+    }
+
+    @Test
+    public void retainsEveryIdentifiedContentNodeWhenAPageHasMoreThanForty() {
+        StringBuilder html = new StringBuilder();
+        for (int i = 1; i <= 65; i++) {
+            html.append("<div id='postmessage_").append(i).append("'>回复 ")
+                    .append(i).append("</div>");
+        }
+        TopicDetail detail = ForumHtmlParsers.extractTopic(
+                Jsoup.parse(html.toString()), "https://stage1st.com/2b/thread-1-1-1.html"
+        );
+        assertEquals(65, detail.posts.size());
+        assertEquals("回复 65", detail.posts.get(64).content);
+    }
+
+    @Test
+    public void keepsShortRepliesAndStandaloneEmoticons() {
+        String html = structuredPost("1", "alice", "完整正文，这是一个普通帖子。")
+                + structuredPost("2", "bob", "谢谢")
+                + structuredPost("3", "carol",
+                "<img src='static/image/smiley/default/lol.gif' alt='[笑]'>");
+        TopicDetail detail = ForumHtmlParsers.extractTopic(
+                Jsoup.parse(html, "https://stage1st.com/2b/"),
+                "https://stage1st.com/2b/thread-1-1-1.html"
+        );
+
+        assertEquals(3, detail.posts.size());
+        assertEquals("bob", detail.posts.get(1).author);
+        assertEquals("谢谢", detail.posts.get(1).content);
+        assertEquals(1, detail.posts.get(2).inlineImages.size());
+    }
+
+    @Test
+    public void keepsIdenticalRepliesFromDifferentPostsWithoutDuplicatingNestedContainers() {
+        String html = "<div id='post_1'><div class='post'>"
+                + "<span class='author'>alice</span><div id='postmessage_1'>完全相同的回复内容。</div>"
+                + "</div></div>" + structuredPost("2", "bob", "完全相同的回复内容。");
+        TopicDetail detail = ForumHtmlParsers.extractTopic(
+                Jsoup.parse(html), "https://stage1st.com/2b/thread-1-1-1.html"
+        );
+
+        assertEquals(2, detail.posts.size());
+        assertEquals("alice", detail.posts.get(0).author);
+        assertEquals("bob", detail.posts.get(1).author);
+        assertEquals(detail.posts.get(0).content, detail.posts.get(1).content);
+    }
+
+    @Test
+    public void keepsShortPostsWhenOnlyContentNodesAreAvailable() {
+        TopicDetail detail = ForumHtmlParsers.extractTopic(
+                Jsoup.parse("<div id='postmessage_1'>谢谢</div><div id='postmessage_2'>谢谢</div>"),
+                "https://stage1st.com/2b/thread-1-1-1.html"
+        );
+        assertEquals(2, detail.posts.size());
+    }
+
+    @Test
+    public void ignoresNumericCitationsAndOtherTopicPaginationLinks() {
+        String html = structuredPost("1", "alice", "正文")
+                + "<a href='https://example.test/citation'>2</a>"
+                + "<div class='pg'><a href='thread-999-2-1.html'>2</a></div>"
+                + "<a href='https://other.test/thread-1-2-1.html'>下一页</a>";
+        assertFalse(ForumHtmlParsers.extractTopic(
+                Jsoup.parse(html, "https://stage1st.com/2b/"),
+                "https://stage1st.com/2b/thread-1-1-1.html"
+        ).hasMore);
+    }
+
+    @Test
+    public void recognizesSameTopicPaginationForDiscuzAndNga() {
+        assertTrue(ForumHtmlParsers.extractTopic(
+                Jsoup.parse("<div class='pg'><a href='thread-1-2-1.html'>2</a></div>",
+                        "https://stage1st.com/2b/"),
+                "https://stage1st.com/2b/thread-1-1-1.html", 1
+        ).hasMore);
+        assertTrue(ForumHtmlParsers.extractTopic(
+                Jsoup.parse("<div class='pages'><a href='read.php?tid=1&amp;page=3'>3</a></div>",
+                        "https://bbs.nga.cn/"),
+                "https://bbs.nga.cn/read.php?tid=1&page=2", 2
+        ).hasMore);
+        assertTrue(ForumHtmlParsers.extractTopic(
+                Jsoup.parse("<a rel='next' href='read.php?tid=1&amp;page=2'>更多</a>",
+                        "https://bbs.nga.cn/"),
+                "https://bbs.nga.cn/read.php?tid=1", 1
+        ).hasMore);
+    }
+
+    @Test
+    public void doesNotTreatCurrentPageOrSkippedPagesAsNext() {
+        assertFalse(ForumHtmlParsers.extractTopic(
+                Jsoup.parse("<div class='pg'><a href='thread-1-2-1.html'>2</a>"
+                                + "<a href='thread-1-4-1.html'>4</a></div>",
+                        "https://stage1st.com/2b/"),
+                "https://stage1st.com/2b/thread-1-2-1.html", 2
+        ).hasMore);
+    }
+
+    private static String structuredPost(String id, String author, String content) {
+        return "<div id='post_" + id + "'><span class='author'>" + author
+                + "</span><div id='postmessage_" + id + "'>" + content + "</div></div>";
+    }
+
     @Test
     public void extractsS1TopicLinks() {
         Document document = Jsoup.parse(

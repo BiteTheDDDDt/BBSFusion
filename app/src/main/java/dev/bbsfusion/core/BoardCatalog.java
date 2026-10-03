@@ -3,6 +3,7 @@ package dev.bbsfusion.core;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 public final class BoardCatalog {
@@ -131,11 +132,24 @@ public final class BoardCatalog {
             boards.put(board.key(), board);
         }
         for (BoardDefinition board : second) {
-            if (!boards.containsKey(board.key())) {
-                boards.put(board.key(), board);
-            }
+            boards.put(board.key(), board);
         }
         return new ArrayList<>(boards.values());
+    }
+
+    public static List<BoardDefinition> filter(List<BoardDefinition> boards, String siteId, String query) {
+        String search = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
+        List<BoardDefinition> filtered = new ArrayList<>();
+        for (BoardDefinition board : boards) {
+            if (siteId != null && !siteId.isEmpty() && !siteId.equals(board.siteId)) {
+                continue;
+            }
+            String label = board.sourceLabel + " " + board.title + " " + board.boardId;
+            if (search.isEmpty() || label.toLowerCase(Locale.ROOT).contains(search)) {
+                filtered.add(board);
+            }
+        }
+        return filtered;
     }
 
     private static BoardDefinition s1(String boardId, String title) {

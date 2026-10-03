@@ -18,6 +18,70 @@ import static org.junit.Assert.assertTrue;
 
 public final class LinuxDoConnectorTest {
     @Test
+    public void responseParsersRetainAllIdentifiedPostsBeyondEighty() throws Exception {
+        StringBuilder html = new StringBuilder("<h1>主题</h1>");
+        StringBuilder rss = new StringBuilder("<rss><channel><title>主题</title>");
+        org.json.JSONArray posts = new org.json.JSONArray();
+        for (int i = 1; i <= 90; i++) {
+            html.append("<article><div class='cooked'>回复 ").append(i).append("</div></article>");
+            rss.append("<item><guid>post-").append(i).append("</guid><description>回复 ")
+                    .append(i).append("</description></item>");
+            posts.put(new JSONObject().put("post_number", i).put("cooked", "<p>回复 " + i + "</p>"));
+        }
+        rss.append("</channel></rss>");
+        assertEquals(90, LinuxDoConnector.parseTopicFromHtml(
+                Jsoup.parse(html.toString()), "https://linux.do/t/topic/201").posts.size());
+        assertEquals(90, LinuxDoConnector.parseTopicFromRss(
+                Jsoup.parse(rss.toString(), "https://linux.do/", Parser.xmlParser()),
+                "https://linux.do/t/topic/201").posts.size());
+        JSONObject page = new JSONObject().put("post_stream", new JSONObject().put("posts", posts));
+        assertEquals(90, LinuxDoConnector.parseTopicFromJson(
+                page, "https://linux.do/t/topic/201", 2, false, "主题").posts.size());
+    }
+
+    @Test
+    public void rssFallbackPrefersTheOpeningItemAndDeduplicatesOnlyItsStableId() {
+        String xml = "<rss><channel><title>主题</title><description>主帖正文</description>"
+                + "<item><guid>post-1</guid><dc:creator>alice</dc:creator><description>主帖正文</description></item>"
+                + "<item><guid>post-1</guid><dc:creator>alice</dc:creator><description>主帖正文</description></item>"
+                + "<item><guid>post-2</guid><dc:creator>bob</dc:creator><description>主帖正文</description></item>"
+                + "</channel></rss>";
+        TopicDetail detail = LinuxDoConnector.parseTopicFromRss(
+                Jsoup.parse(xml, "https://linux.do/t/sample-topic/201.rss", Parser.xmlParser()),
+                "https://linux.do/t/sample-topic/201");
+        assertEquals(2, detail.posts.size());
+        assertEquals("alice", detail.posts.get(0).author);
+        assertEquals("bob", detail.posts.get(1).author);
+    }
+
+    @Test
+    public void htmlFallbackParsesNestedPostContainersOnlyOnceAndKeepsSameTextReplies() {
+        String html = "<h1>主题</h1><article><a href='/u/alice'>alice</a>"
+                + "<div class='topic-body'><div class='crawler-post'><div class='cooked'>相同回复</div></div></div>"
+                + "</article><article><a href='/u/bob'>bob</a>"
+                + "<div class='topic-body'><div class='cooked'>相同回复</div></div></article>";
+        TopicDetail detail = LinuxDoConnector.parseTopicFromHtml(
+                Jsoup.parse(html, "https://linux.do/"), "https://linux.do/t/sample-topic/201");
+        assertEquals(2, detail.posts.size());
+        assertEquals("alice", detail.posts.get(0).author);
+        assertEquals("bob", detail.posts.get(1).author);
+    }
+
+    @Test
+    public void rssFallbackKeepsDifferentPostsWithIdenticalText() {
+        String xml = "<rss><channel><title>主题</title><description>主帖正文</description>"
+                + "<item><guid>post-1</guid><dc:creator>alice</dc:creator><description>相同回复</description></item>"
+                + "<item><guid>post-2</guid><dc:creator>bob</dc:creator><description>相同回复</description></item>"
+                + "</channel></rss>";
+        TopicDetail detail = LinuxDoConnector.parseTopicFromRss(
+                Jsoup.parse(xml, "https://linux.do/t/sample-topic/201.rss", Parser.xmlParser()),
+                "https://linux.do/t/sample-topic/201");
+        assertEquals(3, detail.posts.size());
+        assertEquals("alice", detail.posts.get(1).author);
+        assertEquals("bob", detail.posts.get(2).author);
+    }
+
+    @Test
     public void extractsTopicsFromDiscourseJson() throws Exception {
         JSONObject root = new JSONObject(
                 "{"
@@ -93,7 +157,7 @@ public final class LinuxDoConnectorTest {
         assertEquals("alice", post.author);
         assertEquals("https://linux.do/user_avatar/linux.do/alice/96/1_2.png", post.avatarUrl);
         assertEquals("发表于 2026-6-8 15:10 · 编辑 2026-6-8 16:10", post.meta);
-        assertEquals("回复 #2", post.replyContext);
+        assertEquals("回复 2楼", post.replyContext);
         assertEquals("正文", post.content);
         assertEquals("https://linux.do/uploads/default/original/1/sample.png", post.imageUrls.get(0));
     }

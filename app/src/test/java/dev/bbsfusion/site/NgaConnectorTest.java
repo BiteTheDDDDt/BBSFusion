@@ -5,12 +5,105 @@ import dev.bbsfusion.core.BoardDefinition;
 import org.json.JSONObject;
 import org.junit.Test;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 public final class NgaConnectorTest {
+    @Test
+    public void usesApiTopicTitleAndPageCountWhenFirstPageContainsNineteenPosts() throws Exception {
+        JSONObject root = apiPage(19).put("tsubject", "真实接口的主题标题")
+                .put("subject", "兼容字段")
+                .put("currentPage", 1).put("totalPage", 2).put("perPage", 20).put("vrows", 35);
+        dev.bbsfusion.core.TopicDetail detail = NgaConnector.parseTopicFromApi(
+                root, "https://bbs.nga.cn/read.php?tid=1", 1);
+        assertEquals("真实接口的主题标题", detail.title);
+        assertEquals(19, detail.posts.size());
+        assertTrue(detail.hasMore);
+    }
+
+    @Test
+    public void aFullLastApiPageDoesNotOfferAnotherPage() throws Exception {
+        JSONObject root = apiPage(20).put("currentPage", 2).put("totalPage", 2);
+        assertFalse(NgaConnector.parseTopicFromApi(root, "https://bbs.nga.cn/read.php?tid=1", 2).hasMore);
+    }
+
+    @Test
+    public void usesVisibleRowsAndPageSizeIfTotalPageIsMissing() throws Exception {
+        JSONObject root = apiPage(19).put("currentPage", 1).put("perPage", 20).put("vrows", 35);
+        assertTrue(NgaConnector.parseTopicFromApi(root, "https://bbs.nga.cn/read.php?tid=1", 1).hasMore);
+        root = apiPage(20).put("currentPage", 2).put("perPage", 20).put("vrows", 40);
+        assertFalse(NgaConnector.parseTopicFromApi(root, "https://bbs.nga.cn/read.php?tid=1", 2).hasMore);
+    }
+
+    @Test
+    public void emptyPagesAndClampedEarlierPagesDoNotAppendOrContinue() throws Exception {
+        JSONObject empty = apiPage(0).put("currentPage", 3).put("totalPage", 5);
+        assertFalse(NgaConnector.parseTopicFromApi(empty, "https://bbs.nga.cn/read.php?tid=1", 3).hasMore);
+        JSONObject clamped = apiPage(20).put("currentPage", 2).put("totalPage", 2);
+        dev.bbsfusion.core.TopicDetail detail = NgaConnector.parseTopicFromApi(
+                clamped, "https://bbs.nga.cn/read.php?tid=1", 3);
+        assertEquals(0, detail.posts.size());
+        assertFalse(detail.hasMore);
+    }
+
+    private static JSONObject apiPage(int count) throws Exception {
+        org.json.JSONArray posts = new org.json.JSONArray();
+        for (int i = 0; i < count; i++) {
+            posts.put(new JSONObject().put("content", "回复 " + i).put("subject", ""));
+        }
+        return new JSONObject().put("result", posts);
+    }
+
+    @Test
+    public void laterPagesRetainPidInsteadOfInventingALocalFloorNumber() throws Exception {
+        JSONObject root = new JSONObject("{\"result\":["
+                + "{\"pid\":123,\"content\":\"被回复的正文\"},"
+                + "{\"pid\":124,\"content\":\"[pid=123]引用正文[/pid]我的回复\"}]}");
+        assertEquals("回复 #123：引用正文",
+                NgaConnector.parseTopicFromApi(root, "https://bbs.nga.cn/read.php?tid=1", 2)
+                        .posts.get(1).replyContext);
+        assertEquals("回复 1楼：引用正文",
+                NgaConnector.parseTopicFromApi(root, "https://bbs.nga.cn/read.php?tid=1", 1)
+                        .posts.get(1).replyContext);
+    }
+
+    @Test
+    public void retainsAllPostsAlreadyReturnedByTheApi() throws Exception {
+        org.json.JSONArray posts = new org.json.JSONArray();
+        for (int i = 0; i < 65; i++) {
+            posts.put(new JSONObject().put("content", "回复 " + i));
+        }
+        JSONObject root = new JSONObject().put("result", posts);
+        assertEquals(65, NgaConnector.parseTopicFromApi(root, "https://bbs.nga.cn/read.php?tid=1", 1)
+                .posts.size());
+    }
+
+    @Test
+    public void buildsTopicFallbackPageBeforeFragmentsAndReplacesExistingPage() {
+        assertEquals("https://bbs.nga.cn/read.php?tid=123&page=3",
+                NgaConnector.pagedTopicUrl("https://bbs.nga.cn/read.php?tid=123#post_7", 3));
+        assertEquals("https://bbs.nga.cn/read.php?tid=123&page=2&foo=bar",
+                NgaConnector.pagedTopicUrl("https://bbs.nga.cn/read.php?tid=123&page=8&foo=bar", 2));
+        assertEquals("https://bbs.nga.cn/read.php?tid=123&page=1",
+                NgaConnector.pagedTopicUrl("https://bbs.nga.cn/read.php?tid=123&page=8", 1));
+    }
+
+    @Test
+    public void keepsSingleCharacterRepliesFromApi() throws Exception {
+        JSONObject root = new JSONObject(
+                "{\"subject\":\"主题\",\"result\":[{\"author\":\"alice\",\"content\":\"好\"}]}"
+        );
+        assertEquals(1, NgaConnector.parseTopicFromApi(root, "https://bbs.nga.cn/read.php?tid=1", 1)
+                .posts.size());
+        assertEquals("好", NgaConnector.parseTopicFromApi(root, "https://bbs.nga.cn/read.php?tid=1", 1)
+                .posts.get(0).content);
+    }
+
     @Test
     public void buildsBoardFormForPagedFidBoards() {
         BoardDefinition board = new BoardDefinition(
@@ -188,6 +281,32 @@ public final class NgaConnectorTest {
         NgaConnector.ParsedApiContent parsed = NgaConnector.parseApiContent(new JSONObject(), content);
 
         assertEquals("引用：alice 发表于 2026-6-8 17:50 原文", parsed.replyContext);
+        assertEquals("回复正文", parsed.text);
+    }
+
+    @Test
+    public void mapsPidReplyContextToKnownFloorNumber() {
+        Map<String, Integer> floorByPid = new HashMap<>();
+        floorByPid.put("123", 2);
+        String content = "[pid=123]alice 发表于 2026-6-8 17:50 原文[/pid]回复正文";
+
+        NgaConnector.ParsedApiContent parsed = NgaConnector.parseApiContent(
+                new JSONObject(),
+                content,
+                floorByPid
+        );
+
+        assertEquals("回复 2楼：alice 发表于 2026-6-8 17:50 原文", parsed.replyContext);
+        assertEquals("回复正文", parsed.text);
+    }
+
+    @Test
+    public void keepsPidWhenReplyFloorIsUnknown() {
+        String content = "[pid=123]alice 发表于 2026-6-8 17:50 原文[/pid]回复正文";
+
+        NgaConnector.ParsedApiContent parsed = NgaConnector.parseApiContent(new JSONObject(), content);
+
+        assertEquals("回复 #123：alice 发表于 2026-6-8 17:50 原文", parsed.replyContext);
         assertEquals("回复正文", parsed.text);
     }
 

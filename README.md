@@ -23,8 +23,12 @@ This project is not affiliated with, endorsed by, or sponsored by S1, NGA, V2EX,
 
 - S1, NGA, V2EX, and Linux.do topic list aggregation.
 - Local subscription groups.
+- Searchable board directories with site filters and local caching.
+- Incremental group pagination, with existing topics preserved when a refresh fails.
 - Original-site login through WebView cookies.
 - Native topic detail view with usernames, avatars, and inline images.
+- Reading-position restoration on rotation, page retry, and bounded image caching.
+- Original-site file selection, browser handoff, and Android 16 back navigation.
 - Local-only preferences through Android storage.
 
 Notes:
@@ -42,7 +46,7 @@ Notes:
 Create `local.properties` locally if Android Studio does not create it for you:
 
 ```text
-sdk.dir=C:/Users/you/AppData/Local/Android/Sdk
+sdk.dir=C\:/Users/you/AppData/Local/Android/Sdk
 ```
 
 You can also set environment variables:

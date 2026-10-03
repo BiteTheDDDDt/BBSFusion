@@ -1,6 +1,7 @@
 package dev.bbsfusion.site;
 
 import dev.bbsfusion.core.BoardDefinition;
+import dev.bbsfusion.core.TopicDetail;
 import dev.bbsfusion.core.TopicSummary;
 
 import org.json.JSONArray;
@@ -13,6 +14,22 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 public final class V2exConnectorTest {
+    @Test
+    public void retainsEveryReplyReturnedByTheApiBeyondEightyPosts() throws Exception {
+        JSONObject topic = new JSONObject().put("title", "主题").put("content_rendered", "<p>主帖</p>");
+        JSONArray replies = new JSONArray();
+        for (int i = 1; i <= 100; i++) {
+            replies.put(new JSONObject()
+                    .put("content_rendered", "<p>回复 " + i + "</p>")
+                    .put("member", new JSONObject().put("username", "user" + i)));
+        }
+        TopicDetail detail = V2exConnector.parseTopic(topic, replies, "https://www.v2ex.com/t/1");
+        assertEquals(101, detail.posts.size());
+        assertEquals("主帖", detail.posts.get(0).content);
+        assertEquals("user100", detail.posts.get(100).author);
+        assertEquals("回复 100", detail.posts.get(100).content);
+    }
+
     @Test
     public void extractsTopicsFromPublicApi() throws Exception {
         JSONArray array = new JSONArray(

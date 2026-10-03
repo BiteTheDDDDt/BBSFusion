@@ -1,10 +1,12 @@
 package dev.bbsfusion.site;
 
 import android.webkit.CookieManager;
+import dev.bbsfusion.core.HttpUrlResolver;
 
 import org.jsoup.Connection;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
 import org.jsoup.parser.Parser;
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -18,6 +20,7 @@ import java.util.Map;
 final class NetworkClient {
     private static final int TIMEOUT_MILLIS = 15000;
     private static final int MAX_BODY_SIZE = 3 * 1024 * 1024;
+    private static final int MAX_REDIRECTS = 8;
     private static final String USER_AGENT =
             "Mozilla/5.0 (Linux; Android 15; Mobile) AppleWebKit/537.36 "
                     + "(KHTML, like Gecko) Chrome/126.0 Mobile Safari/537.36 BBSFusion/0.1";
@@ -66,27 +69,9 @@ final class NetworkClient {
     }
 
     static JSONObject postNgaApi(String actionUrl, Map<String, String> formData) throws IOException {
-        Connection connection = Jsoup.connect(actionUrl)
-                .userAgent(USER_AGENT)
-                .header("X-User-Agent", NGA_APP_USER_AGENT)
-                .header("Accept", "application/json,text/plain,*/*")
-                .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.6")
-                .timeout(TIMEOUT_MILLIS)
-                .maxBodySize(MAX_BODY_SIZE)
-                .method(Connection.Method.POST)
-                .ignoreContentType(true)
-                .ignoreHttpErrors(true);
-
-        for (Map.Entry<String, String> entry : formData.entrySet()) {
-            connection.data(entry.getKey(), entry.getValue());
-        }
-
-        CookieManager cookieManager = CookieManager.getInstance();
-        appendCookieHeader(connection, cookieManager, actionUrl);
-        appendCookieHeader(connection, cookieManager, "https://bbs.nga.cn/");
-
-        Connection.Response response = connection.execute();
-        saveCookies(cookieManager, response);
+        Connection.Response response = request(
+                actionUrl, null, false, "application/json,text/plain,*/*", formData
+        );
 
         try {
             JSONObject json = new JSONObject(response.body());
@@ -105,10 +90,8 @@ final class NetworkClient {
     }
 
     private static Document get(String url, String referrer, boolean desktop) throws IOException {
-        Connection connection = baseConnection(url, referrer, desktop)
-                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-
-        Connection.Response response = execute(connection, url, referrer);
+        Connection.Response response = request(url, referrer, desktop,
+                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", null);
 
         Document document = response.parse();
         throwIfAccessBlocked(document);
@@ -121,9 +104,7 @@ final class NetworkClient {
             boolean desktop,
             String accept
     ) throws IOException {
-        Connection connection = baseConnection(url, referrer, desktop)
-                .header("Accept", accept);
-        Connection.Response response = execute(connection, url, referrer);
+        Connection.Response response = request(url, referrer, desktop, accept, null);
         return response.body();
     }
 
@@ -133,7 +114,7 @@ final class NetworkClient {
                 .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.6")
                 .timeout(TIMEOUT_MILLIS)
                 .maxBodySize(MAX_BODY_SIZE)
-                .followRedirects(true)
+                .followRedirects(false)
                 .ignoreContentType(true)
                 .ignoreHttpErrors(true);
         if (referrer != null && !referrer.trim().isEmpty()) {
@@ -142,54 +123,142 @@ final class NetworkClient {
         return connection;
     }
 
-    private static Connection.Response execute(
-            Connection connection,
+    private static Connection.Response request(
             String url,
-            String referrer
+            String referrer,
+            boolean desktop,
+            String accept,
+            Map<String, String> formData
     ) throws IOException {
         CookieManager cookieManager = CookieManager.getInstance();
-        appendCookieHeader(connection, cookieManager, url);
-        if (referrer != null && !referrer.trim().isEmpty()) {
-            appendCookieHeader(connection, cookieManager, referrer);
-        }
-
-        Connection.Response response;
         try {
-            response = connection.execute();
-        } catch (IOException error) {
-            throw annotateConnectionError(url, error);
-        }
-        saveCookies(cookieManager, response);
-        if (response.statusCode() >= 400) {
-            throw new IOException("站点返回 HTTP " + response.statusCode() + "。可尝试原站登录或换网络环境。");
-        }
-        return response;
-    }
+            return execute(url, referrer, desktop, accept, formData, new CookieStore() {
+                @Override
+                public String get(String targetUrl) {
+                    return cookieManager.getCookie(targetUrl);
+                }
 
-    private static void appendCookieHeader(
-            Connection connection,
-            CookieManager cookieManager,
-            String url
-    ) {
-        String cookie = cookieManager.getCookie(url);
-        if (cookie == null || cookie.trim().isEmpty()) {
-            return;
-        }
-
-        String existing = connection.request().header("Cookie");
-        if (existing == null || existing.trim().isEmpty()) {
-            connection.header("Cookie", cookie);
-        } else {
-            connection.header("Cookie", existing + "; " + cookie);
+                @Override
+                public void set(String targetUrl, String header) {
+                    cookieManager.setCookie(targetUrl, header);
+                }
+            }, Connection::execute);
+        } finally {
+            cookieManager.flush();
         }
     }
 
-    private static void saveCookies(CookieManager cookieManager, Connection.Response response) {
-        String responseUrl = response.url().toString();
-        for (Map.Entry<String, String> cookie : response.cookies().entrySet()) {
-            cookieManager.setCookie(responseUrl, cookie.getKey() + "=" + cookie.getValue());
+    // Each redirect gets a fresh connection and cookies selected for that URL only.
+    // Never let a transport copy a manually supplied Cookie header to the next host.
+    static Connection.Response execute(
+            String url,
+            String referrer,
+            boolean desktop,
+            String accept,
+            Map<String, String> formData,
+            CookieStore cookies,
+            ResponseFetcher fetcher
+    ) throws IOException {
+        URI original = webUri(url);
+        URI current = original;
+        String currentReferrer = referrer;
+        boolean post = formData != null;
+        for (int redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
+            String currentUrl = current.toString();
+            Connection connection = baseConnection(currentUrl, currentReferrer, desktop)
+                    .header("Accept", accept);
+            if (post) {
+                connection.method(Connection.Method.POST).header("X-User-Agent", NGA_APP_USER_AGENT);
+                for (Map.Entry<String, String> entry : formData.entrySet()) {
+                    connection.data(entry.getKey(), entry.getValue());
+                }
+            }
+            String cookie = cookies.get(currentUrl);
+            if (cookie != null && !cookie.trim().isEmpty()) {
+                connection.header("Cookie", cookie);
+            }
+
+            Connection.Response response;
+            try {
+                response = fetcher.fetch(connection);
+            } catch (IOException error) {
+                throw annotateConnectionError(currentUrl, error);
+            }
+            for (String header : response.headers("Set-Cookie")) {
+                cookies.set(currentUrl, header);
+            }
+
+            int status = response.statusCode();
+            boolean redirect = status == 301 || status == 302 || status == 303
+                    || status == 307 || status == 308;
+            if (!redirect) {
+                if (status >= 400) {
+                    response.body();
+                    throw new IOException("站点返回 HTTP " + status + "。可尝试原站登录或换网络环境。");
+                }
+                return response;
+            }
+
+            // Consume the intermediate body so its connection is released.
+            response.body();
+            String location = response.header("Location");
+            if (location == null || location.trim().isEmpty() || redirects == MAX_REDIRECTS) {
+                throw new IOException("站点重定向无效或次数过多。请使用原站打开。");
+            }
+            URI next;
+            try {
+                next = webUri(HttpUrlResolver.resolve(current, location.trim()).toString());
+            } catch (IllegalArgumentException error) {
+                throw new IOException("站点返回了无效的重定向地址。", error);
+            }
+            if ("https".equalsIgnoreCase(current.getScheme())
+                    && !"https".equalsIgnoreCase(next.getScheme())) {
+                throw new IOException("已停止从 HTTPS 跳转到不安全连接。请使用原站打开。");
+            }
+            if (formData != null && !sameOrigin(original, next)) {
+                throw new IOException("接口重定向到了其他站点。请使用原站打开。");
+            }
+            currentReferrer = sameOrigin(current, next) ? currentUrl : null;
+            if (status == 301 || status == 302 || status == 303) {
+                post = false;
+            }
+            current = next;
         }
-        cookieManager.flush();
+        throw new IOException("站点重定向次数过多。");
+    }
+
+    private static URI webUri(String url) throws IOException {
+        try {
+            URI uri = URI.create(url);
+            String scheme = uri.getScheme();
+            if (("https".equalsIgnoreCase(scheme) || "http".equalsIgnoreCase(scheme))
+                    && uri.getHost() != null && uri.getUserInfo() == null) {
+                return uri;
+            }
+        } catch (IllegalArgumentException ignored) {
+            // Report malformed and unsupported targets as a normal fetch failure.
+        }
+        throw new IOException("站点链接不是有效的 HTTP 或 HTTPS 地址。");
+    }
+
+    private static boolean sameOrigin(URI left, URI right) {
+        return left.getScheme().equalsIgnoreCase(right.getScheme())
+                && left.getHost().equalsIgnoreCase(right.getHost())
+                && effectivePort(left) == effectivePort(right);
+    }
+
+    private static int effectivePort(URI uri) {
+        return uri.getPort() >= 0 ? uri.getPort() : "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80;
+    }
+
+    interface CookieStore {
+        String get(String url);
+
+        void set(String url, String header);
+    }
+
+    interface ResponseFetcher {
+        Connection.Response fetch(Connection connection) throws IOException;
     }
 
     private static IOException annotateConnectionError(String url, IOException error) {
@@ -219,11 +288,26 @@ final class NetworkClient {
         }
     }
 
-    private static void throwIfAccessBlocked(Document document) throws IOException {
+    static void throwIfAccessBlocked(Document document) throws IOException {
         String title = document.title() == null ? "" : document.title();
-        String text = document.body() == null ? "" : document.body().text();
+        // A visitor prompt or a discussion about logging in is not an access error.
+        if (document.selectFirst("tbody[id^=normalthread_], #threadlist, .threadlist, "
+                + ".t_f, [id^=postmessage_], .plc[id^=pid] .message, "
+                + ".postcontent, [id^=postcontent], .post_content, .topic-body, article") != null) {
+            return;
+        }
+        Element notice = document.selectFirst("#messagetext, #messagetext_0, .alert_error, "
+                + ".alert_error_login, .permission-denied, #errorbox");
+        boolean promptPage = title.trim().startsWith("提示信息");
+        String text = notice != null ? notice.text()
+                : promptPage && document.body() != null ? document.body().text() : "";
         String normalized = text.toLowerCase(Locale.ROOT);
-        if (text.contains("未登录")
+        String normalizedTitle = title.trim().toLowerCase(Locale.ROOT);
+        boolean loginPage = (normalizedTitle.startsWith("登录") || normalizedTitle.startsWith("登陆")
+                || normalizedTitle.startsWith("login") || normalizedTitle.startsWith("log in")
+                || normalizedTitle.startsWith("sign in"))
+                && document.selectFirst("form input[type=password]") != null;
+        if (loginPage || text.contains("未登录")
                 || text.contains("请登录")
                 || text.contains("登录后访问")
                 || text.contains("你可能需要")
@@ -231,7 +315,7 @@ final class NetworkClient {
                 || normalized.contains("login required")) {
             throw new IOException("需要登录：请点“原站登录”，完成登录后返回刷新。");
         }
-        if (title.contains("提示信息")) {
+        if (promptPage) {
             throw new IOException("站点提示：" + concise(text));
         }
     }

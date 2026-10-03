@@ -23,8 +23,11 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -148,7 +151,7 @@ public final class LinuxDoConnector implements ForumConnector {
         for (String jsonUrl : jsonUrlsForTopic(url)) {
             try {
                 TopicDetail detail = fetchTopicPageFromJson(jsonUrl, url, pageNumber);
-                if (!detail.posts.isEmpty()) {
+                if (!detail.posts.isEmpty() || pageNumber > 1 && !detail.hasMore) {
                     return detail;
                 }
             } catch (IOException error) {
@@ -195,6 +198,11 @@ public final class LinuxDoConnector implements ForumConnector {
             int pageNumber
     ) throws IOException {
         JSONObject root = NetworkClient.getJsonObject(topicJsonRequestUrl(jsonUrl), topicUrl);
+        JSONObject initialStream = root.optJSONObject("post_stream");
+        if (initialStream == null || initialStream.optJSONArray("stream") == null
+                || initialStream.optJSONArray("posts") == null) {
+            throw new IOException("Linux.do 接口未返回有效帖子数据。");
+        }
         if (pageNumber <= 1) {
             return parseTopicFromJson(root, topicUrl, 1);
         }
@@ -222,6 +230,10 @@ public final class LinuxDoConnector implements ForumConnector {
             return new TopicDetail(topicTitle(root), topicUrl, new ArrayList<>(), pageNumber, false);
         }
         JSONObject postsRoot = NetworkClient.getJsonObject(postsUrl, topicUrl);
+        JSONObject postsStream = postsRoot.optJSONObject("post_stream");
+        if (postsStream == null || postsStream.optJSONArray("posts") == null) {
+            throw new IOException("Linux.do 接口未返回有效帖子数据。");
+        }
         return parseTopicFromJson(
                 postsRoot,
                 topicUrl,
@@ -410,9 +422,6 @@ public final class LinuxDoConnector implements ForumConnector {
             if (post != null) {
                 posts.add(post);
             }
-            if (posts.size() >= 80) {
-                break;
-            }
         }
         return new TopicDetail(title.isEmpty() ? "帖子详情" : title, url, posts, pageNumber, hasMore);
     }
@@ -420,13 +429,18 @@ public final class LinuxDoConnector implements ForumConnector {
     static TopicDetail parseTopicFromHtml(Document document, String url) {
         String title = clean(firstText(document, "h1", "title"));
         List<Post> posts = new ArrayList<>();
+        Set<Element> seenContent = Collections.newSetFromMap(new IdentityHashMap<>());
         for (Element container : document.select("article, .topic-body, .crawler-post")) {
             Element contentElement = firstElement(container, ".cooked", ".post", ".topic-body", "div");
             if (contentElement == null) {
                 contentElement = container;
             }
+            if (!seenContent.add(contentElement)) {
+                continue;
+            }
             ParsedContent content = parsedCooked(contentElement.html());
-            if (content.text.length() < 2 && content.imageUrls.isEmpty()) {
+            if (content.text.isEmpty() && content.imageUrls.isEmpty()
+                    && content.inlineImages.isEmpty() && content.replyContext.isEmpty()) {
                 continue;
             }
             String author = clean(firstText(container, ".creator a", ".names a", "a[href^=/u/]"));
@@ -447,9 +461,6 @@ public final class LinuxDoConnector implements ForumConnector {
                     content.imageUrls,
                     content.inlineImages
             ));
-            if (posts.size() >= 80) {
-                break;
-            }
         }
         return new TopicDetail(title.isEmpty() ? "帖子详情" : title, url, posts);
     }
@@ -457,13 +468,13 @@ public final class LinuxDoConnector implements ForumConnector {
     static TopicDetail parseTopicFromRss(Document document, String url) {
         String title = clean(firstText(document, "channel > title", "title"));
         List<Post> posts = new ArrayList<>();
-        List<String> seenContent = new ArrayList<>();
+        Set<String> seenItems = new HashSet<>();
 
         ParsedContent topicDescription = parsedRssDescription(
                 firstText(document, "channel > description"),
                 url
         );
-        addRssPostIfPresent(posts, seenContent, new Post(
+        Post descriptionPost = new Post(
                 "主题",
                 "",
                 "",
@@ -471,9 +482,13 @@ public final class LinuxDoConnector implements ForumConnector {
                 topicDescription.text,
                 topicDescription.imageUrls,
                 topicDescription.inlineImages
-        ));
+        );
 
         for (Element item : sortedRssItems(document)) {
+            String itemKey = firstNonEmpty(firstText(item, "guid"), firstText(item, "link"));
+            if (!itemKey.isEmpty() && !seenItems.add(itemKey)) {
+                continue;
+            }
             ParsedContent content = parsedRssDescription(firstText(item, "description"), url);
             if (content.text.isEmpty() && content.imageUrls.isEmpty()) {
                 continue;
@@ -483,7 +498,7 @@ public final class LinuxDoConnector implements ForumConnector {
                     "楼层 " + (posts.size() + 1)
             );
             String meta = postMetaFromRssDate(firstText(item, "pubDate"));
-            addRssPostIfPresent(posts, seenContent, new Post(
+            addRssPostIfPresent(posts, new Post(
                     author,
                     "",
                     meta,
@@ -492,9 +507,20 @@ public final class LinuxDoConnector implements ForumConnector {
                     content.imageUrls,
                     content.inlineImages
             ));
-            if (posts.size() >= 80) {
+        }
+        // The channel description may repeat the opening post. Prefer its real
+        // item (with author/time) while retaining different items with equal text.
+        boolean descriptionAlreadyPresent = false;
+        for (Post post : posts) {
+            if (clean(post.content).equals(clean(descriptionPost.content))
+                    && post.imageUrls.equals(descriptionPost.imageUrls)) {
+                descriptionAlreadyPresent = true;
                 break;
             }
+        }
+        if (!descriptionAlreadyPresent && (!descriptionPost.content.isEmpty()
+                || !descriptionPost.imageUrls.isEmpty() || !descriptionPost.replyContext.isEmpty())) {
+            posts.add(0, descriptionPost);
         }
         return new TopicDetail(title.isEmpty() ? "帖子详情" : title, url, posts);
     }
@@ -630,7 +656,7 @@ public final class LinuxDoConnector implements ForumConnector {
         String replyContext = content.replyContext;
         int replyTo = item.optInt("reply_to_post_number", 0);
         if (replyContext.isEmpty() && replyTo > 0) {
-            replyContext = "回复 #" + replyTo;
+            replyContext = "回复 " + replyTo + "楼";
         }
         int postNumber = item.optInt("post_number", fallbackNumber);
         return new Post(
@@ -848,18 +874,11 @@ public final class LinuxDoConnector implements ForumConnector {
 
     private static void addRssPostIfPresent(
             List<Post> posts,
-            List<String> seenContent,
             Post post
     ) {
         String contentKey = clean(post.content);
         if (contentKey.isEmpty() && post.imageUrls.isEmpty()) {
             return;
-        }
-        if (!contentKey.isEmpty() && seenContent.contains(contentKey)) {
-            return;
-        }
-        if (!contentKey.isEmpty()) {
-            seenContent.add(contentKey);
         }
         posts.add(post);
     }

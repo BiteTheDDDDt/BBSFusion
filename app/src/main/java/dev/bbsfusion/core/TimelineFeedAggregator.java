@@ -24,59 +24,99 @@ public final class TimelineFeedAggregator {
         );
     }
 
-    static Result load(
+    public static Result load(
             List<BoardDefinition> boards,
             PageFetcher fetcher,
             int targetTopicCount,
             int maxPagesPerSource,
             int maxVisibleTopicCount
     ) {
-        if (boards == null || boards.isEmpty()) {
-            return new Result(Collections.emptyList(), Collections.emptyList(), 0L);
-        }
-
-        List<SourceState> sources = new ArrayList<>();
-        List<String> failures = new ArrayList<>();
-        for (BoardDefinition board : boards) {
-            SourceState source = new SourceState(board);
-            source.loadNext(fetcher, maxPagesPerSource, failures);
-            sources.add(source);
-        }
-
-        while (visibleTimedCount(sources, watermarkMillis(sources)) < targetTopicCount) {
-            SourceState source = sourceBlockingWatermark(sources, maxPagesPerSource);
-            if (source == null) {
-                break;
-            }
-            source.loadNext(fetcher, maxPagesPerSource, failures);
-        }
-
-        long watermark = watermarkMillis(sources);
-        List<TopicSummary> visible = visibleTopics(sources, watermark);
-        if (visible.isEmpty()) {
-            visible = allTopics(sources);
-        }
-        List<TopicSummary> ordered = FeedOrdering.order(visible);
-        if (ordered.size() > maxVisibleTopicCount) {
-            ordered = new ArrayList<>(ordered.subList(0, maxVisibleTopicCount));
-        }
-        return new Result(ordered, failures, watermark == Long.MIN_VALUE ? 0L : watermark);
+        return newSession(boards).load(fetcher, targetTopicCount, maxPagesPerSource, maxVisibleTopicCount);
     }
 
-    private static SourceState sourceBlockingWatermark(List<SourceState> sources, int maxPagesPerSource) {
-        SourceState selected = null;
-        long selectedTail = Long.MIN_VALUE;
-        for (SourceState source : sources) {
-            if (!source.canLoadMore(maxPagesPerSource) || !source.hasTimedTopics()) {
-                continue;
+    public static Session newSession(List<BoardDefinition> boards) {
+        return new Session(boards);
+    }
+
+    /** Retains page cursors and fetched topics until the user explicitly refreshes the group. */
+    public static final class Session {
+        private final List<SourceState> sources = new ArrayList<>();
+
+        private Session(List<BoardDefinition> boards) {
+            if (boards == null) {
+                return;
             }
-            long tail = source.tailTimeMillis();
-            if (tail > selectedTail) {
-                selected = source;
-                selectedTail = tail;
+            Map<String, BoardDefinition> uniqueBoards = new LinkedHashMap<>();
+            for (BoardDefinition board : boards) {
+                uniqueBoards.put(board.key(), board);
+            }
+            for (BoardDefinition board : uniqueBoards.values()) {
+                sources.add(new SourceState(board));
             }
         }
-        return selected;
+
+        /** maxPagesPerSource limits additional requests in this call, not the lifetime of a source. */
+        public synchronized Result load(
+                PageFetcher fetcher,
+                int targetTopicCount,
+                int maxPagesPerSource,
+                int maxVisibleTopicCount
+        ) {
+            List<String> failures = new ArrayList<>();
+            for (SourceState source : sources) {
+                source.beginLoad(maxPagesPerSource);
+                if (source.pagesFetched == 0 || source.retryPending) {
+                    source.loadNext(fetcher, failures);
+                }
+            }
+
+            while (true) {
+                long watermark = watermarkMillis(sources);
+                List<TopicSummary> visible = visibleTopics(sources, watermark);
+                if (timedCount(visible) >= targetTopicCount) {
+                    break;
+                }
+                SourceState source = sourceBlockingWatermark(sources, watermark);
+                if (source == null && visible.size() < targetTopicCount) {
+                    source = untimedSource(sources);
+                }
+                if (source == null) {
+                    break;
+                }
+                source.loadNext(fetcher, failures);
+            }
+
+            long watermark = watermarkMillis(sources);
+            List<TopicSummary> ordered = FeedOrdering.order(visibleTopics(sources, watermark));
+            int visibleLimit = Math.max(0, maxVisibleTopicCount);
+            if (ordered.size() > visibleLimit) {
+                ordered = new ArrayList<>(ordered.subList(0, visibleLimit));
+            }
+            boolean hasMore = allTopics(sources).size() > ordered.size();
+            for (SourceState source : sources) {
+                // A request budget or a transient failure is not evidence that the site has ended.
+                hasMore |= !source.exhausted;
+            }
+            return new Result(ordered, failures, watermark == Long.MIN_VALUE ? 0L : watermark, hasMore);
+        }
+    }
+
+    private static SourceState sourceBlockingWatermark(List<SourceState> sources, long watermark) {
+        for (SourceState source : sources) {
+            if (source.canLoadMore() && source.hasTimedTopics() && source.tailTimeMillis() == watermark) {
+                return source;
+            }
+        }
+        return null;
+    }
+
+    private static SourceState untimedSource(List<SourceState> sources) {
+        for (SourceState source : sources) {
+            if (source.canLoadMore() && !source.hasTimedTopics()) {
+                return source;
+            }
+        }
+        return null;
     }
 
     private static long watermarkMillis(List<SourceState> sources) {
@@ -90,9 +130,9 @@ public final class TimelineFeedAggregator {
         return watermark;
     }
 
-    private static int visibleTimedCount(List<SourceState> sources, long watermark) {
+    private static int timedCount(List<TopicSummary> topics) {
         int count = 0;
-        for (TopicSummary topic : visibleTopics(sources, watermark)) {
+        for (TopicSummary topic : topics) {
             if (topic.sortTimeMillis > 0L) {
                 count++;
             }
@@ -154,11 +194,13 @@ public final class TimelineFeedAggregator {
         public final List<TopicSummary> topics;
         public final List<String> failures;
         public final long watermarkMillis;
+        public final boolean hasMore;
 
-        Result(List<TopicSummary> topics, List<String> failures, long watermarkMillis) {
+        Result(List<TopicSummary> topics, List<String> failures, long watermarkMillis, boolean hasMore) {
             this.topics = Collections.unmodifiableList(new ArrayList<>(topics));
             this.failures = Collections.unmodifiableList(new ArrayList<>(failures));
             this.watermarkMillis = watermarkMillis;
+            this.hasMore = hasMore;
         }
     }
 
@@ -167,13 +209,23 @@ public final class TimelineFeedAggregator {
         final Map<String, TopicSummary> topicsByKey = new LinkedHashMap<>();
         int pagesFetched;
         boolean exhausted;
+        int remainingRequests;
+        boolean failedThisLoad;
+        boolean retryPending;
+        long oldestObservedTimeMillis = Long.MAX_VALUE;
 
         SourceState(BoardDefinition board) {
             this.board = board;
         }
 
-        boolean canLoadMore(int maxPagesPerSource) {
-            return !exhausted && pagesFetched < maxPagesPerSource;
+        void beginLoad(int maxPagesPerSource) {
+            remainingRequests = Math.max(0, maxPagesPerSource);
+            failedThisLoad = false;
+        }
+
+        boolean canLoadMore() {
+            return !exhausted && !failedThisLoad && remainingRequests > 0
+                    && !Thread.currentThread().isInterrupted();
         }
 
         boolean hasTimedTopics() {
@@ -181,30 +233,29 @@ public final class TimelineFeedAggregator {
         }
 
         long tailTimeMillis() {
-            long tail = Long.MAX_VALUE;
-            for (TopicSummary topic : topicsByKey.values()) {
-                if (topic.sortTimeMillis > 0L) {
-                    tail = Math.min(tail, topic.sortTimeMillis);
-                }
-            }
-            return tail == Long.MAX_VALUE ? Long.MIN_VALUE : tail;
+            // A reply can update a duplicate topic on a later page. That must not move
+            // an already-covered timeline boundary forward and hide visible topics.
+            return oldestObservedTimeMillis == Long.MAX_VALUE ? Long.MIN_VALUE : oldestObservedTimeMillis;
         }
 
-        void loadNext(PageFetcher fetcher, int maxPagesPerSource, List<String> failures) {
-            if (!canLoadMore(maxPagesPerSource)) {
+        void loadNext(PageFetcher fetcher, List<String> failures) {
+            if (!canLoadMore()) {
                 return;
             }
 
             int page = pagesFetched + 1;
             List<TopicSummary> pageTopics;
+            remainingRequests--;
             try {
                 pageTopics = fetcher.fetch(board, page);
             } catch (Exception error) {
                 failures.add(board.sourceLabel + " 第 " + page + " 页：" + concise(error.getMessage()));
-                exhausted = true;
+                failedThisLoad = true;
+                retryPending = true;
                 return;
             }
             pagesFetched = page;
+            retryPending = false;
 
             if (pageTopics == null || pageTopics.isEmpty()) {
                 exhausted = true;
@@ -213,6 +264,9 @@ public final class TimelineFeedAggregator {
 
             int added = 0;
             for (TopicSummary topic : pageTopics) {
+                if (topic.sortTimeMillis > 0L) {
+                    oldestObservedTimeMillis = Math.min(oldestObservedTimeMillis, topic.sortTimeMillis);
+                }
                 String key = topic.siteId + ":" + topic.url;
                 if (!topicsByKey.containsKey(key)) {
                     topicsByKey.put(key, topic);

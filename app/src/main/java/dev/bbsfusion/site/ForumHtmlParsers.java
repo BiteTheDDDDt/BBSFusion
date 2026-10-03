@@ -13,11 +13,14 @@ import org.jsoup.select.Elements;
 
 import java.net.URI;
 import java.time.LocalDate;
+import java.time.DateTimeException;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -176,7 +179,7 @@ public final class ForumHtmlParsers {
                 posts.add(new Post("页面正文", body));
             }
         }
-        return new TopicDetail(title, url, posts, pageNumber, hasNextPage(document, pageNumber));
+        return new TopicDetail(title, url, posts, pageNumber, hasNextPage(document, url, pageNumber));
     }
 
     public static List<BoardDefinition> extractBoards(
@@ -217,7 +220,7 @@ public final class ForumHtmlParsers {
 
     private static List<Post> extractPosts(Document document) {
         List<Post> posts = new ArrayList<>();
-        Set<String> seen = new HashSet<>();
+        Set<Element> seen = Collections.newSetFromMap(new IdentityHashMap<>());
 
         addStructuredPosts(posts, seen, document.select("div[id^=post_], table[id^=pid], .plc[id^=pid]"));
         addStructuredPosts(posts, seen, document.select(".postlist > div, .postrow, .post"));
@@ -242,11 +245,11 @@ public final class ForumHtmlParsers {
                 ParsedPostContent content = parsedPostContent(element);
                 String text = content.text;
                 List<String> imageUrls = extractPostImages(element);
-                if (text.length() < 12 && imageUrls.isEmpty()) {
+                if (text.isEmpty() && imageUrls.isEmpty()
+                        && content.inlineImages.isEmpty() && content.replyContext.isEmpty()) {
                     continue;
                 }
-                String seenKey = text + " " + imageUrls;
-                if (!seen.add(seenKey)) {
+                if (!seen.add(element)) {
                     continue;
                 }
                 posts.add(new Post(
@@ -258,18 +261,16 @@ public final class ForumHtmlParsers {
                         imageUrls,
                         content.inlineImages
                 ));
-                if (posts.size() >= 40) {
-                    return posts;
-                }
             }
             if (!posts.isEmpty()) {
                 return posts;
             }
         }
 
+        Set<String> seenFallbackText = new HashSet<>();
         for (Element paragraph : document.select("article, p, div")) {
             String text = clean(paragraph.text());
-            if (text.length() < 40 || !seen.add(text)) {
+            if (text.length() < 40 || !seenFallbackText.add(text)) {
                 continue;
             }
             posts.add(new Post(fallbackAuthor(posts.size()), text));
@@ -283,7 +284,7 @@ public final class ForumHtmlParsers {
 
     private static void addStructuredPosts(
             List<Post> posts,
-            Set<String> seen,
+            Set<Element> seen,
             Elements containers
     ) {
         for (Element container : containers) {
@@ -304,11 +305,11 @@ public final class ForumHtmlParsers {
             ParsedPostContent parsedContent = parsedPostContent(contentElement);
             String content = parsedContent.text;
             List<String> imageUrls = extractPostImages(contentElement);
-            if (content.length() < 12 && imageUrls.isEmpty()) {
+            if (content.isEmpty() && imageUrls.isEmpty()
+                    && parsedContent.inlineImages.isEmpty() && parsedContent.replyContext.isEmpty()) {
                 continue;
             }
-            String seenKey = content + " " + imageUrls;
-            if (!seen.add(seenKey)) {
+            if (!seen.add(contentElement)) {
                 continue;
             }
 
@@ -327,9 +328,6 @@ public final class ForumHtmlParsers {
                     imageUrls,
                     parsedContent.inlineImages
             ));
-            if (posts.size() >= 40) {
-                return;
-            }
         }
     }
 
@@ -681,17 +679,50 @@ public final class ForumHtmlParsers {
         return title.isEmpty() ? "帖子详情" : title;
     }
 
-    private static boolean hasNextPage(Document document, int pageNumber) {
+    private static boolean hasNextPage(Document document, String topicUrl, int pageNumber) {
         for (Element anchor : document.select("a[href]")) {
             String text = clean(anchor.text());
-            if ("下一页".equals(text) || "下页".equals(text) || "Next".equalsIgnoreCase(text)) {
-                return true;
-            }
-            if (String.valueOf(pageNumber + 1).equals(text)) {
+            boolean nextLabel = "下一页".equals(text) || "下页".equals(text)
+                    || "Next".equalsIgnoreCase(text) || anchor.hasClass("nxt")
+                    || "next".equalsIgnoreCase(anchor.attr("rel"));
+            boolean pagination = anchor.closest(".pg, .pgs, .page, .pages, .pagination, "
+                    + ".pager, .pagebar, .pgbox") != null;
+            if ((nextLabel || pagination) && isNextTopicPage(
+                    topicUrl, absoluteUrl(anchor, anchor.attr("href"), topicUrl), pageNumber + 1)) {
                 return true;
             }
         }
         return false;
+    }
+
+    private static boolean isNextTopicPage(String topicUrl, String href, int nextPage) {
+        try {
+            URI current = URI.create(topicUrl);
+            URI target = current.resolve(href);
+            if (current.getHost() == null || target.getHost() == null
+                    || !current.getHost().equalsIgnoreCase(target.getHost())
+                    || !current.getScheme().equalsIgnoreCase(target.getScheme())
+                    || current.getPort() != target.getPort()) {
+                return false;
+            }
+            Matcher currentId = S1_THREAD_ID.matcher(topicUrl);
+            Matcher targetId = S1_THREAD_ID.matcher(target.toString());
+            if (!currentId.find() || !targetId.find() || !currentId.group(1).equals(targetId.group(1))) {
+                return false;
+            }
+            Matcher page = Pattern.compile("thread-\\d+-(\\d+)-\\d+\\.html")
+                    .matcher(target.getPath());
+            if (!page.find()) {
+                page = Pattern.compile("(?:^|&)page=(\\d+)(?:&|$)")
+                        .matcher(target.getRawQuery() == null ? "" : target.getRawQuery());
+                if (!page.find()) {
+                    return false;
+                }
+            }
+            return Integer.parseInt(page.group(1)) == nextPage;
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
     }
 
     private static boolean isTopicUrl(String siteId, String rawHref, String absoluteUrl) {
@@ -825,6 +856,14 @@ public final class ForumHtmlParsers {
     }
 
     static long parseTimeMillis(String text) {
+        try {
+            return parseValidTimeMillis(text);
+        } catch (DateTimeException | NumberFormatException | ArithmeticException ignored) {
+            return 0L;
+        }
+    }
+
+    private static long parseValidTimeMillis(String text) {
         String value = clean(text);
         if (value.isEmpty()) {
             return 0L;
@@ -871,7 +910,7 @@ public final class ForumHtmlParsers {
             } else if ("天".equals(unit)) {
                 millis = 86_400_000L;
             }
-            return System.currentTimeMillis() - amount * millis;
+            return Math.subtractExact(System.currentTimeMillis(), Math.multiplyExact(amount, millis));
         }
 
         Matcher monthDay = MONTH_DAY_TIME.matcher(value);

@@ -184,14 +184,15 @@ public final class NgaConnector implements ForumConnector {
     public TopicDetail fetchTopicPage(String url, int page) throws IOException {
         try {
             TopicDetail detail = fetchTopicFromApi(url, page);
-            if (!detail.posts.isEmpty()) {
+            if (!detail.posts.isEmpty() || page > 1) {
                 return detail;
             }
         } catch (IOException ignored) {
             // Fall back to the web page parser; some posts or sessions may not work with the app API.
         }
-        Document document = NetworkClient.get(url, HOME_URL);
-        return ForumHtmlParsers.extractTopic(document, url, page);
+        String pageUrl = pagedTopicUrl(url, page);
+        Document document = NetworkClient.get(pageUrl, HOME_URL);
+        return ForumHtmlParsers.extractTopic(document, pageUrl, page);
     }
 
     private List<TopicSummary> fetchTopicsFromApiPage(BoardDefinition board, int page) throws IOException {
@@ -253,28 +254,38 @@ public final class NgaConnector implements ForumConnector {
         form.put("tid", tid);
         form.put("page", String.valueOf(Math.max(1, page)));
         JSONObject json = NetworkClient.postNgaApi(POST_API, form);
+        if (json.optJSONArray("result") == null) {
+            throw new IOException("NGA 接口未返回有效帖子数据。");
+        }
+        return parseTopicFromApi(json, url, page);
+    }
+
+    static TopicDetail parseTopicFromApi(JSONObject json, String url, int page) {
         JSONArray result = json.optJSONArray("result");
         if (result == null) {
             return new TopicDetail("帖子详情", url, new ArrayList<>(), page, false);
         }
 
         List<Post> posts = new ArrayList<>();
-        for (int i = 0; i < result.length() && posts.size() < 40; i++) {
+        Map<String, Integer> floorByPid = new HashMap<>();
+        for (int i = 0; i < result.length(); i++) {
             JSONObject item = result.optJSONObject(i);
             if (item == null) {
                 continue;
             }
 
             String rawContent = item.optString("content", "");
-            ParsedApiContent parsedContent = parseApiContent(item, rawContent);
-            if (parsedContent.text.length() < 2
+            ParsedApiContent parsedContent = parseApiContent(item, rawContent, floorByPid);
+            if (parsedContent.text.isEmpty()
                     && parsedContent.imageUrls.isEmpty()
-                    && parsedContent.inlineImages.isEmpty()) {
+                    && parsedContent.inlineImages.isEmpty()
+                    && parsedContent.replyContext.isEmpty()) {
                 continue;
             }
             String author = authorFromPostJson(item, json, posts.size());
             String avatarUrl = avatarFromPostJson(item, json);
             String meta = postMetaFromApiPost(item);
+            int floorNumber = posts.size() + 1;
             posts.add(new Post(
                     author,
                     avatarUrl,
@@ -284,9 +295,16 @@ public final class NgaConnector implements ForumConnector {
                     parsedContent.imageUrls,
                     parsedContent.inlineImages
             ));
+            String postId = postIdFromPostJson(item);
+            if (!postId.isEmpty() && page <= 1) {
+                floorByPid.put(postId, floorNumber);
+            }
         }
 
-        String title = json.optString("subject", "").trim();
+        String title = firstNonEmpty(
+                json.optString("tsubject", ""),
+                json.optString("subject", "")
+        );
         if (title.isEmpty() && result.length() > 0) {
             JSONObject first = result.optJSONObject(0);
             if (first != null) {
@@ -296,7 +314,33 @@ public final class NgaConnector implements ForumConnector {
         if (title.isEmpty()) {
             title = "帖子详情";
         }
-        return new TopicDetail(title, url, posts, page, result.length() >= 20);
+        int pageNumber = Math.max(1, page);
+        int reportedPage = json.optInt("currentPage", pageNumber);
+        // A topic may shrink while it is being read. Do not append an earlier
+        // page again when the API clamps an out-of-range request to its last page.
+        if (reportedPage > 0 && reportedPage < pageNumber) {
+            return new TopicDetail(title, url, new ArrayList<>(), pageNumber, false);
+        }
+        return new TopicDetail(title, url, posts, pageNumber,
+                hasMoreApiPages(json, Math.max(pageNumber, reportedPage), result.length()));
+    }
+
+    private static boolean hasMoreApiPages(JSONObject root, int page, int receivedCount) {
+        if (receivedCount == 0) {
+            return false;
+        }
+        long totalPages = root.optLong("totalPage", -1L);
+        if (totalPages >= 0L) {
+            return page < totalPages;
+        }
+        long rows = root.optLong("vrows", -1L);
+        long perPage = root.optLong("perPage", 0L);
+        if (rows >= 0L && perPage > 0L) {
+            long pages = rows == 0L ? 0L : (rows - 1L) / perPage + 1L;
+            return page < pages;
+        }
+        // Older responses may omit pagination metadata.
+        return receivedCount >= 20;
     }
 
     private List<BoardDefinition> fetchCategoryBoards() throws IOException {
@@ -433,6 +477,21 @@ public final class NgaConnector implements ForumConnector {
             return url.replaceFirst("([?&]page=)\\d+", "$1" + page);
         }
         return url + (url.contains("?") ? "&" : "?") + "page=" + page;
+    }
+
+    static String pagedTopicUrl(String url, int page) {
+        if (url == null || url.isEmpty()) {
+            return url;
+        }
+        // Page parameters belong before a fragment and must also reset an input
+        // link that already points at a later page when the reader opens page 1.
+        int fragment = url.indexOf('#');
+        String base = fragment >= 0 ? url.substring(0, fragment) : url;
+        int pageNumber = Math.max(1, page);
+        if (Pattern.compile("[?&]page=\\d+(?:&|$)").matcher(base).find()) {
+            return base.replaceFirst("([?&]page=)\\d+", "$1" + pageNumber);
+        }
+        return base + (base.contains("?") ? "&" : "?") + "page=" + pageNumber;
     }
 
     private static String tidFromUrl(String url) {
@@ -609,7 +668,15 @@ public final class NgaConnector implements ForumConnector {
     }
 
     static ParsedApiContent parseApiContent(JSONObject item, String rawContent) {
-        String replyContext = extractReplyContext(rawContent);
+        return parseApiContent(item, rawContent, new HashMap<>());
+    }
+
+    static ParsedApiContent parseApiContent(
+            JSONObject item,
+            String rawContent,
+            Map<String, Integer> floorByPid
+    ) {
+        String replyContext = extractReplyContext(rawContent, floorByPid);
         String content = removeReplyBlocks(rawContent);
         ParsedInlineContent inlineContent = parseInlineContent(content);
         List<String> imageUrls = imageUrlsFromApiPost(item, inlineContent.content);
@@ -667,7 +734,7 @@ public final class NgaConnector implements ForumConnector {
         return meta;
     }
 
-    private static String extractReplyContext(String rawContent) {
+    private static String extractReplyContext(String rawContent, Map<String, Integer> floorByPid) {
         String content = rawContent == null ? "" : rawContent;
         Matcher quote = QUOTE_BLOCK.matcher(content);
         if (quote.find()) {
@@ -679,7 +746,7 @@ public final class NgaConnector implements ForumConnector {
 
         Matcher pid = PID_REPLY.matcher(content);
         if (pid.find()) {
-            String label = "回复 #" + pid.group(1);
+            String label = replyLabelForPid(pid.group(1), floorByPid);
             String text = cleanApiContent(pid.group(2));
             if (!text.isEmpty()) {
                 return label + "：" + abbreviate(text, 80);
@@ -687,6 +754,25 @@ public final class NgaConnector implements ForumConnector {
             return label;
         }
         return "";
+    }
+
+    private static String replyLabelForPid(String pid, Map<String, Integer> floorByPid) {
+        if (floorByPid != null) {
+            Integer floor = floorByPid.get(pid);
+            if (floor != null && floor > 0) {
+                return "回复 " + floor + "楼";
+            }
+        }
+        return "回复 #" + pid;
+    }
+
+    private static String postIdFromPostJson(JSONObject item) {
+        return firstNonEmpty(
+                stringValue(item, "pid"),
+                stringValue(item, "postid"),
+                stringValue(item, "post_id"),
+                stringValue(item, "id")
+        );
     }
 
     private static String removeReplyBlocks(String rawContent) {

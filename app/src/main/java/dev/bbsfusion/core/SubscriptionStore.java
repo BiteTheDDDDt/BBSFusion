@@ -8,14 +8,20 @@ import org.json.JSONException;
 
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 public final class SubscriptionStore {
     private static final String PREFS_NAME = "bbsfusion_subscriptions";
     private static final String KEY_GROUPS = "groups_v1";
     private static final String KEY_SELECTED_GROUP = "selected_group_id";
+    private static final String KEY_DEFAULT_GROUP = "default_group_id";
+    private static final String KEY_SCHEMA_VERSION = "groups_schema_version";
+    private static final int SCHEMA_VERSION = 1;
+    private static final String KEY_BOARD_CATALOG = "board_catalog_v1";
     private static final String LEGACY_AGGREGATE_GROUP_ID = "default";
     private static final String S1_GROUP_ID = "builtin_s1";
     private static final String NGA_GROUP_ID = "builtin_nga";
@@ -26,12 +32,15 @@ public final class SubscriptionStore {
     }
 
     public static List<SubscriptionGroup> loadGroups(Context context) {
-        SharedPreferences prefs = prefs(context);
+        return loadGroups(prefs(context));
+    }
+
+    static List<SubscriptionGroup> loadGroups(SharedPreferences prefs) {
         String raw = prefs.getString(KEY_GROUPS, "");
         if (raw == null || raw.trim().isEmpty()) {
             List<SubscriptionGroup> defaults = defaultGroups();
-            saveGroups(context, defaults);
-            ensureSelectedGroupExists(context, defaults);
+            saveGroups(prefs, defaults);
+            ensureSelectedGroupExists(prefs, defaults);
             return defaults;
         }
 
@@ -41,21 +50,26 @@ public final class SubscriptionStore {
             for (int i = 0; i < array.length(); i++) {
                 groups.add(SubscriptionGroup.fromJson(array.getJSONObject(i)));
             }
-            List<SubscriptionGroup> normalized = normalizeGroups(groups);
-            if (normalized != groups) {
-                saveGroups(context, normalized);
+            boolean migrateLegacyDefaults = prefs.getInt(KEY_SCHEMA_VERSION, 0) < SCHEMA_VERSION;
+            List<SubscriptionGroup> normalized = repairGroupBoardNames(normalizeGroups(groups, migrateLegacyDefaults));
+            if (normalized != groups || migrateLegacyDefaults) {
+                saveGroups(prefs, normalized);
             }
-            ensureSelectedGroupExists(context, normalized);
+            ensureSelectedGroupExists(prefs, normalized, groups);
             return normalized;
         } catch (JSONException ignored) {
             List<SubscriptionGroup> defaults = defaultGroups();
-            saveGroups(context, defaults);
-            ensureSelectedGroupExists(context, defaults);
+            saveGroups(prefs, defaults);
+            ensureSelectedGroupExists(prefs, defaults);
             return defaults;
         }
     }
 
     public static void saveGroups(Context context, List<SubscriptionGroup> groups) {
+        saveGroups(prefs(context), groups);
+    }
+
+    static void saveGroups(SharedPreferences prefs, List<SubscriptionGroup> groups) {
         JSONArray array = new JSONArray();
         try {
             for (SubscriptionGroup group : groups) {
@@ -64,7 +78,94 @@ public final class SubscriptionStore {
         } catch (JSONException ignored) {
             return;
         }
-        prefs(context).edit().putString(KEY_GROUPS, array.toString()).apply();
+        prefs.edit()
+                .putString(KEY_GROUPS, array.toString())
+                .putInt(KEY_SCHEMA_VERSION, SCHEMA_VERSION)
+                .apply();
+    }
+
+    public static List<BoardDefinition> loadBoardCatalog(Context context) {
+        return loadBoardCatalog(prefs(context));
+    }
+
+    static List<BoardDefinition> loadBoardCatalog(SharedPreferences prefs) {
+        List<BoardDefinition> cached = new ArrayList<>();
+        String raw = prefs.getString(KEY_BOARD_CATALOG, "[]");
+        try {
+            JSONArray array = new JSONArray(raw == null ? "[]" : raw);
+            for (int i = 0; i < array.length(); i++) {
+                cached.add(BoardDefinition.fromJson(array.getJSONObject(i)));
+            }
+        } catch (JSONException ignored) {
+            // The built-in directory is still usable if an older cache cannot be read.
+        }
+        List<BoardDefinition> repaired = repairBoardNames(cached, knownBoards());
+        if (repaired != cached) {
+            saveBoardCatalog(prefs, repaired);
+        }
+        return BoardCatalog.merge(BoardCatalog.builtInBoards(), repaired);
+    }
+
+    public static void saveBoardCatalog(Context context, List<BoardDefinition> boards) {
+        saveBoardCatalog(prefs(context), boards);
+    }
+
+    static void saveBoardCatalog(SharedPreferences prefs, List<BoardDefinition> boards) {
+        JSONArray array = new JSONArray();
+        try {
+            for (BoardDefinition board : boards) {
+                array.put(board.toJson());
+            }
+        } catch (JSONException ignored) {
+            return;
+        }
+        prefs.edit().putString(KEY_BOARD_CATALOG, array.toString()).apply();
+    }
+
+    private static Map<String, BoardDefinition> knownBoards() {
+        Map<String, BoardDefinition> known = new LinkedHashMap<>();
+        for (BoardDefinition board : BoardCatalog.builtInBoards()) {
+            known.put(board.key(), board);
+        }
+        return known;
+    }
+
+    private static List<SubscriptionGroup> repairGroupBoardNames(List<SubscriptionGroup> groups) {
+        Map<String, BoardDefinition> known = knownBoards();
+        List<SubscriptionGroup> repaired = new ArrayList<>();
+        boolean changed = false;
+        for (SubscriptionGroup group : groups) {
+            List<BoardDefinition> boards = repairBoardNames(group.boards, known);
+            if (boards != group.boards) {
+                repaired.add(new SubscriptionGroup(group.id, group.name, boards));
+                changed = true;
+            } else {
+                repaired.add(group);
+            }
+        }
+        return changed ? repaired : groups;
+    }
+
+    private static List<BoardDefinition> repairBoardNames(List<BoardDefinition> boards,
+                                                          Map<String, BoardDefinition> known) {
+        List<BoardDefinition> repaired = new ArrayList<>();
+        boolean changed = false;
+        for (BoardDefinition board : boards) {
+            BoardDefinition canonical = known.get(board.key());
+            boolean brokenTitle = board.title.indexOf('\ufffd') >= 0;
+            boolean brokenLabel = board.sourceLabel.indexOf('\ufffd') >= 0;
+            if (canonical != null && (brokenTitle || brokenLabel)) {
+                String title = brokenTitle ? canonical.title : board.title;
+                String prefix = canonical.sourceLabel.substring(0, canonical.sourceLabel.length() - canonical.title.length());
+                String label = brokenLabel ? prefix + title : board.sourceLabel;
+                repaired.add(new BoardDefinition(board.siteId, board.boardId, title, board.url, board.referrer, label));
+                changed = true;
+            } else {
+                repaired.add(board);
+            }
+        }
+        // Repair only names with explicit decoding loss; URLs, subscriptions and user labels stay intact.
+        return changed ? repaired : boards;
     }
 
     public static SubscriptionGroup selectedGroup(Context context) {
@@ -84,6 +185,29 @@ public final class SubscriptionStore {
 
     public static void setSelectedGroupId(Context context, String groupId) {
         prefs(context).edit().putString(KEY_SELECTED_GROUP, groupId).apply();
+    }
+
+    public static String defaultGroupId(Context context) {
+        return defaultGroupId(prefs(context));
+    }
+
+    static String defaultGroupId(SharedPreferences prefs) {
+        return prefs.getString(KEY_DEFAULT_GROUP, prefs.getString(KEY_SELECTED_GROUP, S1_GROUP_ID));
+    }
+
+    public static void setDefaultGroupId(Context context, String groupId) {
+        prefs(context).edit().putString(KEY_DEFAULT_GROUP, groupId).apply();
+    }
+
+    public static SubscriptionGroup defaultGroup(Context context) {
+        List<SubscriptionGroup> groups = loadGroups(context);
+        String defaultId = defaultGroupId(context);
+        for (SubscriptionGroup group : groups) {
+            if (group.id.equals(defaultId)) {
+                return group;
+            }
+        }
+        return groups.get(0);
     }
 
     public static SubscriptionGroup defaultGroup() {
@@ -108,8 +232,15 @@ public final class SubscriptionStore {
     }
 
     static List<SubscriptionGroup> normalizeGroups(List<SubscriptionGroup> source) {
+        return normalizeGroups(source, false);
+    }
+
+    static List<SubscriptionGroup> normalizeGroups(List<SubscriptionGroup> source, boolean migrateLegacyDefaults) {
         if (source.isEmpty()) {
             return defaultGroups();
+        }
+        if (!migrateLegacyDefaults) {
+            return source;
         }
 
         List<SubscriptionGroup> groups = new ArrayList<>(source);
@@ -252,15 +383,40 @@ public final class SubscriptionStore {
         return keys.isEmpty();
     }
 
-    private static void ensureSelectedGroupExists(Context context, List<SubscriptionGroup> groups) {
+    private static void ensureSelectedGroupExists(SharedPreferences prefs, List<SubscriptionGroup> groups) {
+        ensureSelectedGroupExists(prefs, groups, groups);
+    }
+
+    private static void ensureSelectedGroupExists(SharedPreferences prefs, List<SubscriptionGroup> groups,
+                                                  List<SubscriptionGroup> previousGroups) {
         if (groups.isEmpty()) {
             return;
         }
-        String selectedId = selectedGroupId(context);
-        if (indexOfGroup(groups, selectedId) >= 0) {
-            return;
+        String selectedId = prefs.getString(KEY_SELECTED_GROUP, S1_GROUP_ID);
+        String defaultId = defaultGroupId(prefs);
+        SharedPreferences.Editor editor = prefs.edit();
+        if (indexOfGroup(groups, selectedId) < 0) {
+            editor.putString(KEY_SELECTED_GROUP, replacementGroupId(selectedId, previousGroups, groups));
         }
-        setSelectedGroupId(context, groups.get(0).id);
+        if (indexOfGroup(groups, defaultId) < 0) {
+            defaultId = replacementGroupId(defaultId, previousGroups, groups);
+        }
+        // Pin the migrated default once; later browsing must not change the startup preference.
+        editor.putString(KEY_DEFAULT_GROUP, defaultId).apply();
+    }
+
+    private static String replacementGroupId(String removedId, List<SubscriptionGroup> previousGroups,
+                                              List<SubscriptionGroup> groups) {
+        int previousIndex = indexOfGroup(previousGroups, removedId);
+        if (previousIndex >= 0) {
+            SubscriptionGroup previous = previousGroups.get(previousIndex);
+            for (SubscriptionGroup group : groups) {
+                if (isCanonicalizableName(previous.name, group.name) && sameBoardSet(previous.boards, group.boards)) {
+                    return group.id;
+                }
+            }
+        }
+        return groups.get(0).id;
     }
 
     private static int indexOfGroup(List<SubscriptionGroup> groups, String id) {

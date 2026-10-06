@@ -2,6 +2,7 @@ package dev.bbsfusion;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -10,6 +11,7 @@ import android.graphics.drawable.BitmapDrawable;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.net.Uri;
 import android.text.Spannable;
 import android.text.SpannableStringBuilder;
 import android.text.style.ImageSpan;
@@ -26,12 +28,14 @@ import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ListView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import dev.bbsfusion.core.ConnectorRegistry;
 import dev.bbsfusion.core.ForumConnector;
 import dev.bbsfusion.core.Post;
 import dev.bbsfusion.core.TopicDetail;
 import dev.bbsfusion.core.ImageRequestPolicy;
+import dev.bbsfusion.core.ImageLoadFailure;
 import dev.bbsfusion.ui.WindowInsetsHelper;
 
 import java.io.ByteArrayOutputStream;
@@ -59,7 +63,7 @@ public final class TopicActivity extends Activity {
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final ExecutorService imageExecutor = Executors.newFixedThreadPool(4);
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private final Map<String, FutureTask<Bitmap>> imageRequests = new ConcurrentHashMap<>();
+    private final Map<String, FutureTask<ImageResult>> imageRequests = new ConcurrentHashMap<>();
     private final Set<HttpURLConnection> imageConnections = ConcurrentHashMap.newKeySet();
     private BindingToken bindingToken;
 
@@ -133,7 +137,7 @@ public final class TopicActivity extends Activity {
         mainHandler.removeCallbacksAndMessages(null);
         executor.shutdownNow();
         imageExecutor.shutdownNow();
-        for (FutureTask<Bitmap> request : imageRequests.values()) { request.cancel(true); }
+        for (FutureTask<ImageResult> request : imageRequests.values()) { request.cancel(true); }
         for (HttpURLConnection connection : imageConnections) { connection.disconnect(); }
         imageCache.evictAll();
         super.onDestroy();
@@ -443,13 +447,21 @@ public final class TopicActivity extends Activity {
                 continue;
             }
             ImageView postImageView = makeRemoteImageView();
+            FrameLayout imageFrame = new FrameLayout(this);
+            imageFrame.addView(postImageView, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, dp(160)));
+            ImageLoadUi imageUi = new ImageLoadUi(postImageView, imageUrl,
+                    contentImageWidth(), dp(420), true, bindingToken, false);
+            imageFrame.addView(imageUi.container, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.CENTER));
             LinearLayout.LayoutParams imageParams = new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
-                    dp(160)
+                    LinearLayout.LayoutParams.WRAP_CONTENT
             );
             imageParams.topMargin = dp(8);
-            textColumn.addView(postImageView, imageParams);
-            loadRemoteImage(postImageView, imageUrl, contentImageWidth(), dp(420), true);
+            textColumn.addView(imageFrame, imageParams);
+            imageUi.load();
             postImageView.setOnClickListener(v -> showImagePreview(imageUrl));
         }
 
@@ -516,28 +528,102 @@ public final class TopicActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 Math.max(dp(240), screenHeight - dp(180))
         ));
-        TextView loadingView = new TextView(this);
-        loadingView.setText("正在加载图片...");
-        loadingView.setTextColor(Color.WHITE);
-        loadingView.setTextSize(14);
-        loadingView.setGravity(Gravity.CENTER);
-        frame.addView(loadingView, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                Math.max(dp(240), screenHeight - dp(180))
-        ));
+        BindingToken previewToken = new BindingToken();
+        ImageLoadUi imageUi = new ImageLoadUi(imageView, imageUrl,
+                Math.max(dp(240), screenWidth - dp(48)),
+                Math.max(dp(240), screenHeight - dp(180)), false, previewToken, true);
+        frame.addView(imageUi.container, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER));
         AlertDialog dialog = new AlertDialog.Builder(this)
                 .setView(frame)
                 .setPositiveButton("关闭", null)
                 .create();
-        dialog.setOnShowListener(d -> loadRemoteImage(
-                imageView,
-                imageUrl,
-                Math.max(dp(240), screenWidth - dp(48)),
-                Math.max(dp(240), screenHeight - dp(180)),
-                false,
-                loadingView
-        ));
+        dialog.setOnShowListener(d -> imageUi.load());
+        dialog.setOnDismissListener(d -> previewToken.active = false);
         dialog.show();
+    }
+
+    private final class ImageLoadUi {
+        final LinearLayout container = new LinearLayout(TopicActivity.this);
+        final TextView message = new TextView(TopicActivity.this);
+        final LinearLayout actions = new LinearLayout(TopicActivity.this);
+        final BindingToken token;
+        final ImageView imageView;
+        final String imageUrl;
+        final int width;
+        final int height;
+        final boolean resize;
+        boolean loading;
+
+        ImageLoadUi(ImageView imageView, String imageUrl, int width, int height,
+                boolean resize, BindingToken token, boolean dark) {
+            this.imageView = imageView;
+            this.imageUrl = imageUrl;
+            this.width = width;
+            this.height = height;
+            this.resize = resize;
+            this.token = token;
+            container.setOrientation(LinearLayout.VERTICAL);
+            container.setGravity(Gravity.CENTER);
+            container.setPadding(dp(8), dp(4), dp(8), dp(4));
+            message.setGravity(Gravity.CENTER);
+            message.setTextSize(13);
+            message.setTextColor(dark ? Color.WHITE : Color.rgb(83, 83, 83));
+            container.addView(message);
+            actions.setGravity(Gravity.CENTER);
+            Button retry = makeButton("重试");
+            retry.setOnClickListener(v -> load());
+            Button browser = makeButton("浏览器查看");
+            browser.setOnClickListener(v -> openTopicInBrowser());
+            actions.addView(retry, new LinearLayout.LayoutParams(dp(80), dp(44)));
+            actions.addView(browser, new LinearLayout.LayoutParams(dp(120), dp(44)));
+            container.addView(actions);
+            actions.setVisibility(View.GONE);
+        }
+
+        void load() {
+            if (loading || !active(token)) { return; }
+            loading = true;
+            message.setText("正在加载图片...");
+            container.setVisibility(View.VISIBLE);
+            actions.setVisibility(View.GONE);
+            loadRemoteImage(imageView, imageUrl, width, height, resize, this);
+        }
+
+        void complete(ImageResult result) {
+            loading = false;
+            if (result.bitmap != null) {
+                container.setVisibility(View.GONE);
+            } else {
+                message.setText(result.failure);
+                actions.setVisibility(View.VISIBLE);
+                container.setVisibility(View.VISIBLE);
+            }
+        }
+    }
+
+    private void openTopicInBrowser() {
+        if (!isHttpUrl(topicUrl)) { return; }
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(topicUrl))
+                    .addCategory(Intent.CATEGORY_BROWSABLE));
+        } catch (ActivityNotFoundException error) {
+            Toast.makeText(this, "没有可用的浏览器", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private static final class ImageResult {
+        final Bitmap bitmap;
+        final String failure;
+
+        private ImageResult(Bitmap bitmap, String failure) {
+            this.bitmap = bitmap;
+            this.failure = failure;
+        }
+
+        static ImageResult loaded(Bitmap bitmap) { return new ImageResult(bitmap, ""); }
+        static ImageResult failed(String failure) { return new ImageResult(null, failure); }
     }
 
     private CharSequence spannablePostContent(Post post, TextView contentView) {
@@ -580,7 +666,7 @@ public final class TopicActivity extends Activity {
         BindingToken token = bindingToken;
         imageExecutor.execute(() -> {
             if (!active(token) || Thread.currentThread().isInterrupted()) { return; }
-            Bitmap bitmap = fetchRemoteImage(imageUrl, dp(96), dp(96));
+            Bitmap bitmap = fetchRemoteImage(imageUrl, dp(96), dp(96)).bitmap;
             if (bitmap == null) {
                 return;
             }
@@ -656,60 +742,37 @@ public final class TopicActivity extends Activity {
             int targetWidth,
             int maxHeight,
             boolean resizeToBitmap,
-            TextView stateView
+            ImageLoadUi stateView
     ) {
         if (destroyed) { return; }
-        BindingToken token = bindingToken;
+        BindingToken token = stateView == null ? bindingToken : stateView.token;
         imageView.setTag(imageUrl);
         imageExecutor.execute(() -> {
             if (!active(token) || Thread.currentThread().isInterrupted()) { return; }
-            Bitmap bitmap = fetchRemoteImage(imageUrl, targetWidth, maxHeight);
-            if (bitmap == null) {
-                mainHandler.post(() -> updateImageLoadState(imageView, imageUrl, stateView, false));
-                return;
-            }
+            ImageResult result = fetchRemoteImage(imageUrl, targetWidth, maxHeight);
             mainHandler.post(() -> {
                 if (!active(token)) { return; }
                 Object tag = imageView.getTag();
                 if (!(tag instanceof String) || !imageUrl.equals(tag)) {
                     return;
                 }
-                if (resizeToBitmap) {
-                    resizeImageView(imageView, bitmap, targetWidth, maxHeight);
+                if (result.bitmap != null) {
+                    if (resizeToBitmap) {
+                        resizeImageView(imageView, result.bitmap, targetWidth, maxHeight);
+                    }
+                    imageView.setImageBitmap(result.bitmap);
                 }
-                imageView.setImageBitmap(bitmap);
-                updateImageLoadState(imageView, imageUrl, stateView, true);
+                if (stateView != null) { stateView.complete(result); }
             });
         });
     }
 
-    private void updateImageLoadState(
-            ImageView imageView,
-            String imageUrl,
-            TextView stateView,
-            boolean loaded
-    ) {
-        if (destroyed || stateView == null) {
-            return;
-        }
-        Object tag = imageView.getTag();
-        if (!(tag instanceof String) || !imageUrl.equals(tag)) {
-            return;
-        }
-        if (loaded) {
-            stateView.setVisibility(View.GONE);
-        } else {
-            stateView.setText("图片加载失败，可点原站查看。");
-            stateView.setVisibility(View.VISIBLE);
-        }
-    }
-
-    private Bitmap fetchRemoteImage(String imageUrl, int targetWidth, int targetHeight) {
+    private ImageResult fetchRemoteImage(String imageUrl, int targetWidth, int targetHeight) {
         String cacheKey = imageGeneration + "|" + imageUrl + "|" + targetWidth + "x" + targetHeight;
         Bitmap cached = imageCache.get(cacheKey);
-        if (cached != null) { return cached; }
-        FutureTask<Bitmap> request = new FutureTask<>(() -> downloadRemoteImage(imageUrl, targetWidth, targetHeight, cacheKey));
-        FutureTask<Bitmap> existing = imageRequests.putIfAbsent(cacheKey, request);
+        if (cached != null) { return ImageResult.loaded(cached); }
+        FutureTask<ImageResult> request = new FutureTask<>(() -> downloadRemoteImage(imageUrl, targetWidth, targetHeight, cacheKey));
+        FutureTask<ImageResult> existing = imageRequests.putIfAbsent(cacheKey, request);
         boolean owner = existing == null;
         if (!owner) { request = existing; }
         try {
@@ -717,20 +780,27 @@ public final class TopicActivity extends Activity {
             return request.get();
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
-            return null;
+            return ImageResult.failed("图片加载已取消");
         } catch (Exception ignored) {
-            return null;
+            return ImageResult.failed("图片加载失败");
         } finally {
             if (owner) { imageRequests.remove(cacheKey, request); }
         }
     }
 
-    private Bitmap downloadRemoteImage(String imageUrl, int targetWidth, int targetHeight, String cacheKey) {
+    private ImageResult downloadRemoteImage(String imageUrl, int targetWidth, int targetHeight, String cacheKey) {
         HttpURLConnection connection = null;
         try {
-            URI target = ImageRequestPolicy.parse(imageUrl);
+            URI target;
+            try {
+                target = ImageRequestPolicy.parse(imageUrl);
+            } catch (IOException error) {
+                return ImageResult.failed("图片地址无效");
+            }
             for (int hop = 0; hop <= 5; hop++) {
-                if (destroyed || Thread.currentThread().isInterrupted()) { return null; }
+                if (destroyed || Thread.currentThread().isInterrupted()) {
+                    return ImageResult.failed("图片加载已取消");
+                }
                 connection = (HttpURLConnection) target.toURL().openConnection();
                 imageConnections.add(connection);
                 connection.setInstanceFollowRedirects(false);
@@ -750,26 +820,37 @@ public final class TopicActivity extends Activity {
                 }
                 int response = connection.getResponseCode();
                 if (response == 301 || response == 302 || response == 303 || response == 307 || response == 308) {
-                    target = ImageRequestPolicy.redirect(target, connection.getHeaderField("Location"));
+                    try {
+                        target = ImageRequestPolicy.redirect(target, connection.getHeaderField("Location"));
+                    } catch (IOException error) {
+                        return ImageResult.failed("图片跳转地址无效或不安全");
+                    }
                     imageConnections.remove(connection);
                     connection.disconnect();
                     connection = null;
                     continue;
                 }
-                if (response < 200 || response >= 300) { return null; }
+                if (response < 200 || response >= 300) {
+                    return ImageResult.failed(ImageLoadFailure.httpStatus(response));
+                }
                 try (InputStream input = connection.getInputStream()) {
                     byte[] data = readImageBytes(input);
-                    if (data == null || data.length == 0) {
-                        return null;
+                    if (data == null) {
+                        return ImageResult.failed(destroyed || Thread.currentThread().isInterrupted()
+                                ? "图片加载已取消" : "图片超过 12 MB，请在浏览器查看");
+                    }
+                    if (data.length == 0) {
+                        return ImageResult.failed("图片内容为空");
                     }
                     Bitmap bitmap = decodeSampledBitmap(data, targetWidth, targetHeight);
-                    if (bitmap != null && !destroyed) { imageCache.put(cacheKey, bitmap); }
-                    return bitmap;
+                    if (bitmap == null) { return ImageResult.failed("无法解码图片，请在浏览器查看"); }
+                    if (!destroyed) { imageCache.put(cacheKey, bitmap); }
+                    return ImageResult.loaded(bitmap);
                 }
             }
-            return null;
-        } catch (Exception ignored) {
-            return null;
+            return ImageResult.failed("图片跳转次数过多");
+        } catch (Exception error) {
+            return ImageResult.failed(ImageLoadFailure.connection(error));
         } finally {
             if (connection != null) {
                 imageConnections.remove(connection);

@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">BBSFusion</string>
+    <string name="s1_image_failure_hint">S1 %1$s，可在浏览器打开。</string>
 </resources>

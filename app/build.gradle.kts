@@ -24,12 +24,15 @@ android {
     compileSdkMinor = 1
     buildToolsVersion = "36.1.0"
 
+    useLibrary("android.test.runner")
+    useLibrary("android.test.base")
+
     defaultConfig {
         applicationId = "dev.bbsfusion"
         minSdk = 26
         targetSdk = 36
-        versionCode = 7
-        versionName = "0.5"
+        versionCode = 8
+        versionName = "0.5.1"
 
         testInstrumentationRunner = "android.test.InstrumentationTestRunner"
     }

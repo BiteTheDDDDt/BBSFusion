@@ -18,6 +18,9 @@ import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebMessage;
 import android.webkit.WebMessagePort;
+import android.webkit.WebResourceError;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
@@ -33,11 +36,13 @@ import android.widget.TextView;
 import org.json.JSONObject;
 
 import dev.bbsfusion.core.ForumConnector;
+import dev.bbsfusion.core.ImageLoadFailure;
 import dev.bbsfusion.core.NgaLoginPolicy;
 import dev.bbsfusion.ui.WindowInsetsHelper;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 public final class OriginalWebActivity extends Activity {
@@ -49,6 +54,8 @@ public final class OriginalWebActivity extends Activity {
 
     private WebView webView;
     private TextView titleView;
+    private TextView imageFailureView;
+    private boolean showingHttpImageFailure;
     private boolean ngaLogin;
     private int navigationGeneration;
     private int bridgedGeneration = -1;
@@ -119,6 +126,14 @@ public final class OriginalWebActivity extends Activity {
         root.addView(browserButton, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, dp(40)));
 
+        imageFailureView = new TextView(this);
+        imageFailureView.setTextColor(Color.rgb(179, 38, 30));
+        imageFailureView.setTextSize(13);
+        imageFailureView.setPadding(dp(12), dp(4), dp(12), dp(6));
+        imageFailureView.setVisibility(View.GONE);
+        root.addView(imageFailureView, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
         webView = new WebView(this);
         CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
         WebSettings settings = webView.getSettings();
@@ -155,6 +170,9 @@ public final class OriginalWebActivity extends Activity {
             @Override
             public void onPageStarted(WebView view, String url, Bitmap favicon) {
                 navigationGeneration++;
+                showingHttpImageFailure = false;
+                imageFailureView.setText("");
+                imageFailureView.setVisibility(View.GONE);
                 closeLoginPort();
                 cancelFileSelection();
                 super.onPageStarted(view, url, favicon);
@@ -175,6 +193,38 @@ public final class OriginalWebActivity extends Activity {
                     titleView.setText(view.getTitle());
                 }
                 installLoginBridge(url);
+            }
+
+            @Override
+            public void onReceivedHttpError(WebView view, WebResourceRequest request,
+                    WebResourceResponse response) {
+                super.onReceivedHttpError(view, request, response);
+                showS1ImageFailure(view, request, ImageLoadFailure.httpStatus(response.getStatusCode()), true);
+            }
+
+            @Override
+            public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
+                super.onReceivedError(view, request, error);
+                String reason;
+                switch (error.getErrorCode()) {
+                    case ERROR_HOST_LOOKUP:
+                        reason = "图片域名解析失败";
+                        break;
+                    case ERROR_TIMEOUT:
+                        reason = "图片加载超时";
+                        break;
+                    case ERROR_FAILED_SSL_HANDSHAKE:
+                        reason = "图片安全连接失败";
+                        break;
+                    case ERROR_CONNECT:
+                    case ERROR_IO:
+                        reason = "图片连接失败";
+                        break;
+                    default:
+                        reason = "图片加载失败";
+                        break;
+                }
+                showS1ImageFailure(view, request, reason, false);
             }
         });
         root.addView(webView, new LinearLayout.LayoutParams(
@@ -262,6 +312,72 @@ public final class OriginalWebActivity extends Activity {
     private void finishWithCookies() {
         CookieManager.getInstance().flush();
         finish();
+    }
+
+    private void showS1ImageFailure(WebView source, WebResourceRequest request, String reason,
+            boolean httpFailure) {
+        if (source != webView || isFinishing() || isDestroyed() || request.isForMainFrame()) {
+            return;
+        }
+        Uri image = request.getUrl();
+        if (!isWebUri(image) || !"img.stage1st.com".equalsIgnoreCase(image.getHost())
+                || image.getPath() == null || !image.getPath().startsWith("/forum/")) {
+            return;
+        }
+        String pageUrl = source.getUrl();
+        if (pageUrl == null) {
+            return;
+        }
+        Uri page = Uri.parse(pageUrl);
+        if (!isWebUri(page) || !("stage1st.com".equalsIgnoreCase(page.getHost())
+                || "www.stage1st.com".equalsIgnoreCase(page.getHost()))) {
+            return;
+        }
+        // A full Referer identifies the page; origin-only or absent values cannot do so.
+        for (Map.Entry<String, String> header : request.getRequestHeaders().entrySet()) {
+            if (!"Referer".equalsIgnoreCase(header.getKey()) || TextUtils.isEmpty(header.getValue())) {
+                continue;
+            }
+            Uri referrer = Uri.parse(header.getValue());
+            if (!sameOrigin(page, referrer)) {
+                return;
+            }
+            String referrerPath = TextUtils.isEmpty(referrer.getEncodedPath())
+                    ? "/" : referrer.getEncodedPath();
+            String pagePath = TextUtils.isEmpty(page.getEncodedPath()) ? "/" : page.getEncodedPath();
+            boolean identifiesPage = !"/".equals(referrerPath) || referrer.getEncodedQuery() != null;
+            if (identifiesPage && (!referrerPath.equals(pagePath)
+                    || !TextUtils.equals(referrer.getEncodedQuery(), page.getEncodedQuery()))) {
+                return;
+            }
+        }
+        int generation = navigationGeneration;
+        source.post(() -> {
+            if (source != webView || isFinishing() || isDestroyed()
+                    || generation != navigationGeneration || !pageUrl.equals(source.getUrl())
+                    || (showingHttpImageFailure && !httpFailure)) {
+                return;
+            }
+            showingHttpImageFailure = httpFailure;
+            imageFailureView.setText(getString(R.string.s1_image_failure_hint, reason));
+            imageFailureView.setVisibility(View.VISIBLE);
+        });
+    }
+
+    private static boolean isWebUri(Uri uri) {
+        return uri != null && ("https".equalsIgnoreCase(uri.getScheme())
+                || "http".equalsIgnoreCase(uri.getScheme()));
+    }
+
+    private static boolean sameOrigin(Uri left, Uri right) {
+        if (!isWebUri(right) || !left.getScheme().equalsIgnoreCase(right.getScheme())
+                || !left.getHost().equalsIgnoreCase(right.getHost())) {
+            return false;
+        }
+        int defaultPort = "https".equalsIgnoreCase(left.getScheme()) ? 443 : 80;
+        int leftPort = left.getPort() < 0 ? defaultPort : left.getPort();
+        int rightPort = right.getPort() < 0 ? defaultPort : right.getPort();
+        return leftPort == rightPort;
     }
 
     private void installLoginBridge(String url) {

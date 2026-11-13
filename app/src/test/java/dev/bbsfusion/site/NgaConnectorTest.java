@@ -41,14 +41,46 @@ public final class NgaConnectorTest {
     }
 
     @Test
-    public void emptyPagesAndClampedEarlierPagesDoNotAppendOrContinue() throws Exception {
+    public void emptyPagesStopAndClampedPagesRetainTheirActualPageNumber() throws Exception {
         JSONObject empty = apiPage(0).put("currentPage", 3).put("totalPage", 5);
         assertFalse(NgaConnector.parseTopicFromApi(empty, "https://bbs.nga.cn/read.php?tid=1", 3).hasMore);
         JSONObject clamped = apiPage(20).put("currentPage", 2).put("totalPage", 2);
         dev.bbsfusion.core.TopicDetail detail = NgaConnector.parseTopicFromApi(
                 clamped, "https://bbs.nga.cn/read.php?tid=1", 3);
-        assertEquals(0, detail.posts.size());
+        assertEquals(20, detail.posts.size());
+        assertEquals(2, detail.pageNumber);
+        assertEquals(2, detail.lastPage);
         assertFalse(detail.hasMore);
+    }
+
+    @Test
+    public void normalizesOfficialZeroBasedLouAndKeepsGaps() throws Exception {
+        JSONObject root = new JSONObject("{\"currentPage\":2,\"totalPage\":4,\"perPage\":20,\"result\":["
+                + "{\"pid\":123,\"lou\":20,\"content\":\"first\"},"
+                + "{\"pid\":124,\"lou\":22,\"content\":\"[pid=123]quote[/pid]reply\"}]}");
+        dev.bbsfusion.core.TopicDetail detail = NgaConnector.parseTopicFromApi(root,
+                "https://bbs.nga.cn/read.php?tid=1", 2);
+        assertEquals(21, detail.posts.get(0).floorNumber);
+        assertEquals(23, detail.posts.get(1).floorNumber);
+        assertEquals("回复 21楼：quote", detail.posts.get(1).replyContext);
+        assertEquals(4, detail.lastPage);
+        assertEquals(20, detail.pageSize);
+        root.getJSONArray("result").getJSONObject(0).put("lou", 0);
+        assertEquals(0, NgaConnector.parseTopicFromApi(root,
+                "https://bbs.nga.cn/read.php?tid=1", 2).pageSize);
+    }
+
+    @Test
+    public void derivesPageCountButDoesNotGuessFloorsWithoutLou() throws Exception {
+        JSONObject root = apiPage(19).put("currentPage", 1).put("perPage", 20).put("vrows", 35);
+        dev.bbsfusion.core.TopicDetail detail = NgaConnector.parseTopicFromApi(root,
+                "https://bbs.nga.cn/read.php?tid=1", 1);
+        assertEquals(2, detail.lastPage);
+        assertEquals(0, detail.pageSize);
+        assertEquals(0, detail.posts.get(0).floorNumber);
+        root.getJSONArray("result").getJSONObject(0).put("lou", Integer.MAX_VALUE);
+        assertEquals(0, NgaConnector.parseTopicFromApi(root,
+                "https://bbs.nga.cn/read.php?tid=1", 1).posts.get(0).floorNumber);
     }
 
     private static JSONObject apiPage(int count) throws Exception {
@@ -60,14 +92,14 @@ public final class NgaConnectorTest {
     }
 
     @Test
-    public void laterPagesRetainPidInsteadOfInventingALocalFloorNumber() throws Exception {
+    public void unknownFloorsRetainPidInsteadOfInventingALocalFloorNumber() throws Exception {
         JSONObject root = new JSONObject("{\"result\":["
                 + "{\"pid\":123,\"content\":\"被回复的正文\"},"
                 + "{\"pid\":124,\"content\":\"[pid=123]引用正文[/pid]我的回复\"}]}");
         assertEquals("回复 #123：引用正文",
                 NgaConnector.parseTopicFromApi(root, "https://bbs.nga.cn/read.php?tid=1", 2)
                         .posts.get(1).replyContext);
-        assertEquals("回复 1楼：引用正文",
+        assertEquals("回复 #123：引用正文",
                 NgaConnector.parseTopicFromApi(root, "https://bbs.nga.cn/read.php?tid=1", 1)
                         .posts.get(1).replyContext);
     }

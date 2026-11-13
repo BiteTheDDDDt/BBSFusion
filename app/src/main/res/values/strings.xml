@@ -2,4 +2,18 @@
 <resources>
     <string name="app_name">BBSFusion</string>
     <string name="s1_image_failure_hint">S1 %1$s，可在浏览器打开。</string>
+    <string name="update_entry">版本更新</string>
+    <string name="update_installed">当前版本 %1$s</string>
+    <string name="update_unknown_version">未知</string>
+    <string name="update_close">关闭</string>
+    <string name="update_github">GitHub 发布页</string>
+    <string name="update_check">检查更新</string>
+    <string name="update_checking">正在检查更新…</string>
+    <string name="update_current">已是最新正式版。</string>
+    <string name="update_available">有新版本 %1$s，可前往 GitHub 发布页下载 APK。</string>
+    <string name="update_ahead">当前版本高于 GitHub 最新正式版 %1$s。</string>
+    <string name="update_latest">GitHub 最新正式版 %1$s。</string>
+    <string name="update_failed">暂时无法检查更新，请重试或打开 GitHub 发布页查看。</string>
+    <string name="update_rate_limited">GitHub 暂时限制了检查次数，可稍后重试或打开发布页查看。</string>
+    <string name="update_no_browser">没有可用的浏览器</string>
 </resources>

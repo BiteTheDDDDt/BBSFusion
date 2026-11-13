@@ -139,16 +139,19 @@ public final class V2exConnector implements ForumConnector {
                         content.replyContext,
                         content.text,
                         content.imageUrls,
-                        content.inlineImages
+                        content.inlineImages,
+                        1
                 ));
             }
         }
 
+        int receivedReplies = 0;
         for (int i = 0; i < replies.length(); i++) {
             JSONObject reply = replies.optJSONObject(i);
             if (reply == null) {
                 continue;
             }
+            receivedReplies++;
             ParsedContent content = parsedContent(
                     reply.optString("content_rendered", ""),
                     reply.optString("content", "")
@@ -158,18 +161,21 @@ public final class V2exConnector implements ForumConnector {
             }
             JSONObject member = reply.optJSONObject("member");
             posts.add(new Post(
-                    memberName(member, "楼层 " + (posts.size() + 1)),
+                    memberName(member, "楼层 " + (i + 2)),
                     memberAvatar(member),
                     postMeta(reply),
                     content.replyContext,
                     content.text,
                     content.imageUrls,
-                    content.inlineImages
+                    content.inlineImages,
+                    i + 2
             ));
         }
 
         String title = topic == null ? "" : topic.optString("title", "").trim();
-        return new TopicDetail(title.isEmpty() ? "帖子详情" : title, url, posts);
+        int expectedReplies = topic == null ? -1 : topic.optInt("replies", -1);
+        int lastPage = expectedReplies >= 0 && receivedReplies >= expectedReplies ? 1 : 0;
+        return new TopicDetail(title.isEmpty() ? "帖子详情" : title, url, posts, 1, false, lastPage, 0);
     }
 
     static List<TopicSummary> parseTopics(JSONArray array, BoardDefinition board) {

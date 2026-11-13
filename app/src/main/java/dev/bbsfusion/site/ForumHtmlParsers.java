@@ -1,6 +1,7 @@
 package dev.bbsfusion.site;
 
 import dev.bbsfusion.core.BoardDefinition;
+import dev.bbsfusion.core.Poll;
 import dev.bbsfusion.core.Post;
 import dev.bbsfusion.core.TopicDetail;
 import dev.bbsfusion.core.TopicSummary;
@@ -179,7 +180,11 @@ public final class ForumHtmlParsers {
                 posts.add(new Post("页面正文", body));
             }
         }
-        return new TopicDetail(title, url, posts, pageNumber, hasNextPage(document, url, pageNumber));
+        int actualPage = actualTopicPage(document, pageNumber);
+        int lastPage = lastTopicPage(document, url, actualPage);
+        boolean hasMore = lastPage > 0 ? actualPage < lastPage : hasNextPage(document, url, actualPage);
+        return new TopicDetail(title, url, posts, actualPage, hasMore, lastPage,
+                observedFirstPageSize(document, actualPage, hasMore));
     }
 
     public static List<BoardDefinition> extractBoards(
@@ -221,9 +226,10 @@ public final class ForumHtmlParsers {
     private static List<Post> extractPosts(Document document) {
         List<Post> posts = new ArrayList<>();
         Set<Element> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        String question = extractTitle(document);
 
-        addStructuredPosts(posts, seen, document.select("div[id^=post_], table[id^=pid], .plc[id^=pid]"));
-        addStructuredPosts(posts, seen, document.select(".postlist > div, .postrow, .post"));
+        addStructuredPosts(posts, seen, document.select("div[id^=post_], table[id^=pid], .plc[id^=pid]"), question);
+        addStructuredPosts(posts, seen, document.select(".postlist > div, .postrow, .post"), question);
         if (!posts.isEmpty()) {
             return posts;
         }
@@ -245,8 +251,10 @@ public final class ForumHtmlParsers {
                 ParsedPostContent content = parsedPostContent(element);
                 String text = content.text;
                 List<String> imageUrls = extractPostImages(element);
+                List<Poll> polls = PollParsers.discuzPollsBesideContent(element, question);
                 if (text.isEmpty() && imageUrls.isEmpty()
-                        && content.inlineImages.isEmpty() && content.replyContext.isEmpty()) {
+                        && content.inlineImages.isEmpty() && content.replyContext.isEmpty()
+                        && polls.isEmpty()) {
                     continue;
                 }
                 if (!seen.add(element)) {
@@ -259,7 +267,9 @@ public final class ForumHtmlParsers {
                         content.replyContext,
                         text,
                         imageUrls,
-                        content.inlineImages
+                        content.inlineImages,
+                        extractPostFloor(element.closest("div[id^=post_], table[id^=pid], .plc[id^=pid], .postrow, .post")),
+                        polls
                 ));
             }
             if (!posts.isEmpty()) {
@@ -285,7 +295,8 @@ public final class ForumHtmlParsers {
     private static void addStructuredPosts(
             List<Post> posts,
             Set<Element> seen,
-            Elements containers
+            Elements containers,
+            String question
     ) {
         for (Element container : containers) {
             Element contentElement = firstElement(container, new String[]{
@@ -305,8 +316,10 @@ public final class ForumHtmlParsers {
             ParsedPostContent parsedContent = parsedPostContent(contentElement);
             String content = parsedContent.text;
             List<String> imageUrls = extractPostImages(contentElement);
+            List<Poll> polls = PollParsers.discuzPolls(container, question);
             if (content.isEmpty() && imageUrls.isEmpty()
-                    && parsedContent.inlineImages.isEmpty() && parsedContent.replyContext.isEmpty()) {
+                    && parsedContent.inlineImages.isEmpty() && parsedContent.replyContext.isEmpty()
+                    && polls.isEmpty()) {
                 continue;
             }
             if (!seen.add(contentElement)) {
@@ -326,9 +339,54 @@ public final class ForumHtmlParsers {
                     parsedContent.replyContext,
                     content,
                     imageUrls,
-                    parsedContent.inlineImages
+                    parsedContent.inlineImages,
+                    extractPostFloor(container),
+                    polls
             ));
         }
+    }
+
+    private static int extractPostFloor(Element container) {
+        if (container == null) {
+            return 0;
+        }
+        // S1 desktop and mobile templates expose the same one-based floor labels.
+        Element label = container.selectFirst(".pi > strong > a[id^=postnum], .authi > .mtit > .y");
+        if (label == null) {
+            return 0;
+        }
+        String text = clean(label.text());
+        if ("楼主".equals(text)) {
+            return 1;
+        }
+        Matcher number = Pattern.compile("^(\\d+)\\s*(?:#|楼)?$").matcher(text);
+        return number.matches() ? positiveInt(number.group(1)) : 0;
+    }
+
+    private static int observedFirstPageSize(Document document, int page, boolean hasMore) {
+        if (page != 1 || !hasMore) {
+            return 0;
+        }
+        // Do not assume the site's default: members can use a different page size.
+        // Only an entire ascending first page starting at the opening post establishes it.
+        Set<Integer> seen = new HashSet<>();
+        int expected = 1;
+        for (Element container : document.select("div[id^=post_], table[id^=pid], .plc[id^=pid]")) {
+            if (!container.id().matches("(?:post_|pid)\\d+")) {
+                continue;
+            }
+            int floor = extractPostFloor(container);
+            if (floor == 0) {
+                return 0;
+            }
+            if (!seen.add(floor)) {
+                continue; // Desktop outer post divs and nested pid tables identify the same post.
+            }
+            if (floor != expected++) {
+                return 0;
+            }
+        }
+        return expected > 2 ? expected - 1 : 0;
     }
 
     private static String extractPostAuthor(Element container) {
@@ -475,6 +533,7 @@ public final class ForumHtmlParsers {
         Element copy = contentElement.clone();
         String replyContext = extractReplyContext(copy);
         copy.select(".quote, blockquote, .blockquote, .reply-to").remove();
+        PollParsers.removeDiscuzPolls(copy);
         List<Post.InlineImage> inlineImages = new ArrayList<>();
         for (Element image : copy.select("img")) {
             String label = inlineImageLabel(image);
@@ -679,6 +738,48 @@ public final class ForumHtmlParsers {
         return title.isEmpty() ? "帖子详情" : title;
     }
 
+    private static int actualTopicPage(Document document, int requestedPage) {
+        for (Element label : document.select(".pg > strong, .pg input[name=custompage]")) {
+            int page = positiveInt("input".equals(label.tagName()) ? label.val() : label.text());
+            if (page > 0) {
+                return page;
+            }
+        }
+        return Math.max(1, requestedPage);
+    }
+
+    private static int lastTopicPage(Document document, String topicUrl, int actualPage) {
+        int last = 0;
+        Pattern count = Pattern.compile("(?:共\\s*|/\\s*)(\\d+)\\s*页");
+        for (Element pager : document.select(".pg, .pages, .pagination, .pager, .pagebar, .pgbox")) {
+            for (Element label : pager.select("span[title], label > span")) {
+                Matcher total = count.matcher(label.attr("title") + " " + label.text());
+                if (total.find()) {
+                    last = Math.max(last, positiveInt(total.group(1)));
+                }
+            }
+            for (Element anchor : pager.select("a[href]")) {
+                String label = clean(anchor.text());
+                if (anchor.hasClass("last") || "last".equalsIgnoreCase(anchor.attr("rel"))
+                        || label.startsWith("...") || label.startsWith("…")
+                        || "末页".equals(label) || "尾页".equals(label) || "最后一页".equals(label)) {
+                    last = Math.max(last, linkedTopicPage(topicUrl,
+                            absoluteUrl(anchor, anchor.attr("href"), topicUrl)));
+                }
+            }
+        }
+        return last >= actualPage ? last : 0;
+    }
+
+    private static int positiveInt(String value) {
+        try {
+            int number = Integer.parseInt(value.trim());
+            return Math.max(0, number);
+        } catch (NumberFormatException | NullPointerException ignored) {
+            return 0;
+        }
+    }
+
     private static boolean hasNextPage(Document document, String topicUrl, int pageNumber) {
         for (Element anchor : document.select("a[href]")) {
             String text = clean(anchor.text());
@@ -696,6 +797,10 @@ public final class ForumHtmlParsers {
     }
 
     private static boolean isNextTopicPage(String topicUrl, String href, int nextPage) {
+        return linkedTopicPage(topicUrl, href) == nextPage;
+    }
+
+    private static int linkedTopicPage(String topicUrl, String href) {
         try {
             URI current = URI.create(topicUrl);
             URI target = current.resolve(href);
@@ -703,12 +808,12 @@ public final class ForumHtmlParsers {
                     || !current.getHost().equalsIgnoreCase(target.getHost())
                     || !current.getScheme().equalsIgnoreCase(target.getScheme())
                     || current.getPort() != target.getPort()) {
-                return false;
+                return 0;
             }
             Matcher currentId = S1_THREAD_ID.matcher(topicUrl);
             Matcher targetId = S1_THREAD_ID.matcher(target.toString());
             if (!currentId.find() || !targetId.find() || !currentId.group(1).equals(targetId.group(1))) {
-                return false;
+                return 0;
             }
             Matcher page = Pattern.compile("thread-\\d+-(\\d+)-\\d+\\.html")
                     .matcher(target.getPath());
@@ -716,12 +821,12 @@ public final class ForumHtmlParsers {
                 page = Pattern.compile("(?:^|&)page=(\\d+)(?:&|$)")
                         .matcher(target.getRawQuery() == null ? "" : target.getRawQuery());
                 if (!page.find()) {
-                    return false;
+                    return 0;
                 }
             }
-            return Integer.parseInt(page.group(1)) == nextPage;
+            return positiveInt(page.group(1));
         } catch (IllegalArgumentException ignored) {
-            return false;
+            return 0;
         }
     }
 

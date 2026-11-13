@@ -14,6 +14,8 @@ public final class Post {
     public final String content;
     public final List<String> imageUrls;
     public final List<InlineImage> inlineImages;
+    public final int floorNumber;
+    public final List<Poll> polls;
 
     public Post(String author, String content) {
         this(author, "", content);
@@ -40,6 +42,17 @@ public final class Post {
             List<String> imageUrls,
             List<InlineImage> inlineImages
     ) {
+        this(author, avatarUrl, meta, replyContext, content, imageUrls, inlineImages, 0);
+    }
+
+    public Post(String author, String avatarUrl, String meta, String replyContext, String content,
+            List<String> imageUrls, List<InlineImage> inlineImages, int floorNumber) {
+        this(author, avatarUrl, meta, replyContext, content, imageUrls, inlineImages,
+                floorNumber, Collections.emptyList());
+    }
+
+    public Post(String author, String avatarUrl, String meta, String replyContext, String content,
+            List<String> imageUrls, List<InlineImage> inlineImages, int floorNumber, List<Poll> polls) {
         this.author = author;
         this.avatarUrl = avatarUrl == null ? "" : avatarUrl;
         this.meta = meta == null ? "" : meta.trim();
@@ -47,6 +60,9 @@ public final class Post {
         this.editedMeta = prefixedMeta(this.meta, "编辑");
         this.replyContext = replyContext == null ? "" : replyContext.trim();
         this.content = content == null ? "" : content;
+        this.floorNumber = Math.max(0, floorNumber);
+        this.polls = polls.isEmpty() ? Collections.emptyList()
+                : Collections.unmodifiableList(new ArrayList<>(polls));
         if (imageUrls == null || imageUrls.isEmpty()) {
             this.imageUrls = Collections.emptyList();
         } else {

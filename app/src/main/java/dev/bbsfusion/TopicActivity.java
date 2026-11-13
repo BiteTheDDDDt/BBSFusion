@@ -14,15 +14,18 @@ import android.os.Looper;
 import android.net.Uri;
 import android.text.Spannable;
 import android.text.SpannableStringBuilder;
+import android.text.InputType;
 import android.text.style.ImageSpan;
 import android.util.LruCache;
 import android.webkit.CookieManager;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewTreeObserver;
 import android.widget.Button;
 import android.widget.AbsListView;
 import android.widget.BaseAdapter;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -33,7 +36,9 @@ import android.widget.Toast;
 import dev.bbsfusion.core.ConnectorRegistry;
 import dev.bbsfusion.core.ForumConnector;
 import dev.bbsfusion.core.Post;
+import dev.bbsfusion.core.Poll;
 import dev.bbsfusion.core.TopicDetail;
+import dev.bbsfusion.core.TopicNavigation;
 import dev.bbsfusion.core.ImageRequestPolicy;
 import dev.bbsfusion.core.ImageLoadFailure;
 import dev.bbsfusion.ui.WindowInsetsHelper;
@@ -79,6 +84,7 @@ public final class TopicActivity extends Activity {
     private TextView statusView;
     private Button loadMoreButton;
     private Button retryButton;
+    private Button jumpButton;
     private volatile boolean destroyed;
     private boolean pageFailed;
     private boolean userScrolling;
@@ -89,11 +95,11 @@ public final class TopicActivity extends Activity {
     private ForumConnector connector;
     private String topicUrl;
     private String initialTitle;
-    private int loadedPage = 1;
-    private int failedPage = 1;
-    private boolean failedAppend;
+    private int firstLoadedPage = 1;
+    private boolean hasSiteFloorNumbers;
+    private TopicDetail latestPage;
+    private PageRequest retryRequest;
     private boolean isLoadingPage;
-    private boolean hasMorePages;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -110,11 +116,11 @@ public final class TopicActivity extends Activity {
         if (retained instanceof ReadingState) {
             ReadingState state = (ReadingState) retained;
             posts.addAll(state.posts);
-            loadedPage = state.page;
-            hasMorePages = state.hasMore;
-            pageFailed = state.retryNeeded;
-            failedPage = state.retryPage;
-            failedAppend = state.retryAppend;
+            firstLoadedPage = state.firstPage;
+            latestPage = state.latestPage;
+            hasSiteFloorNumbers = state.hasSiteFloorNumbers;
+            retryRequest = state.retryRequest;
+            pageFailed = retryRequest != null;
             retryButton.setText(pageFailed ? "重试" : "刷新");
             titleView.setText(state.title);
             postAdapter.notifyDataSetChanged();
@@ -146,33 +152,46 @@ public final class TopicActivity extends Activity {
     @Override
     public Object onRetainNonConfigurationInstance() {
         View first = postsList.getChildAt(0);
-        return new ReadingState(posts, loadedPage, hasMorePages, titleView.getText().toString(),
-                postsList.getFirstVisiblePosition(), first == null ? 0 : first.getTop(),
-                pageFailed || isLoadingPage, failedPage, failedAppend);
+        return new ReadingState(posts, firstLoadedPage, latestPage, hasSiteFloorNumbers,
+                titleView.getText().toString(),
+                postsList.getFirstVisiblePosition(), first == null ? 0 : first.getTop(), retryRequest);
     }
 
     private static final class ReadingState {
         final List<Post> posts;
-        final int page;
-        final boolean hasMore;
+        final int firstPage;
+        final TopicDetail latestPage;
+        final boolean hasSiteFloorNumbers;
         final String title;
         final int position;
         final int offset;
-        final boolean retryNeeded;
-        final int retryPage;
-        final boolean retryAppend;
+        final PageRequest retryRequest;
 
-        ReadingState(List<Post> posts, int page, boolean hasMore, String title, int position, int offset,
-                boolean retryNeeded, int retryPage, boolean retryAppend) {
+        ReadingState(List<Post> posts, int firstPage, TopicDetail latestPage,
+                boolean hasSiteFloorNumbers, String title,
+                int position, int offset, PageRequest retryRequest) {
             this.posts = new ArrayList<>(posts);
-            this.page = page;
-            this.hasMore = hasMore;
+            this.firstPage = firstPage;
+            this.latestPage = latestPage;
+            this.hasSiteFloorNumbers = hasSiteFloorNumbers;
             this.title = title;
             this.position = position;
             this.offset = offset;
-            this.retryNeeded = retryNeeded;
-            this.retryPage = retryPage;
-            this.retryAppend = retryAppend;
+            this.retryRequest = retryRequest;
+        }
+    }
+
+    private static final class PageRequest {
+        final int page;
+        final boolean append;
+        final int floor;
+        final boolean last;
+
+        PageRequest(int page, boolean append, int floor, boolean last) {
+            this.page = page;
+            this.append = append;
+            this.floor = floor;
+            this.last = last;
         }
     }
 
@@ -202,15 +221,18 @@ public final class TopicActivity extends Activity {
         retryButton = makeButton("刷新");
         retryButton.setOnClickListener(v -> {
             if (pageFailed) {
-                loadTopicPage(failedPage, failedAppend);
+                loadTopicPage(retryRequest);
             } else {
                 loadTopic();
             }
         });
 
-        bar.addView(back, new LinearLayout.LayoutParams(dp(88), dp(44)));
-        bar.addView(open, new LinearLayout.LayoutParams(dp(88), dp(44)));
-        bar.addView(retryButton, new LinearLayout.LayoutParams(dp(88), dp(44)));
+        jumpButton = makeButton("跳转");
+        jumpButton.setEnabled(false);
+        jumpButton.setOnClickListener(v -> showJumpDialog());
+        for (Button button : new Button[] {back, open, retryButton, jumpButton}) {
+            bar.addView(button, new LinearLayout.LayoutParams(0, dp(44), 1));
+        }
         root.addView(bar);
 
         titleView = new TextView(this);
@@ -236,7 +258,7 @@ public final class TopicActivity extends Activity {
             @Override public Post getItem(int position) { return posts.get(position); }
             @Override public long getItemId(int position) { return position; }
             @Override public View getView(int position, View convertView, ViewGroup parent) {
-                return createPostView(getItem(position), position + 1, convertView);
+                return createPostView(getItem(position), floorAt(position), convertView);
             }
         };
         postsList.setAdapter(postAdapter);
@@ -276,33 +298,57 @@ public final class TopicActivity extends Activity {
         if (isLoadingPage || destroyed) { return; }
         imageGeneration++;
         imageCache.evictAll();
-        loadTopicPage(1, false);
+        loadTopicPage(new PageRequest(1, false, 0, false));
     }
 
-    private void loadTopicPage(int page, boolean append) {
+    private void loadTopicPage(PageRequest request) {
         if (destroyed || isLoadingPage) {
             return;
         }
         isLoadingPage = true;
         pageFailed = false;
-        failedPage = page;
-        failedAppend = append;
+        retryRequest = request;
+        TopicDetail current = latestPage;
         int generation = ++requestGeneration;
         retryButton.setEnabled(false);
         updateLoadMoreButton();
-        statusView.setText("正在加载 " + connector.name() + " 帖子...");
+        statusView.setText(request.last ? "正在定位最后一楼..."
+                : request.floor > 0 ? "正在定位第 " + request.floor + " 楼..."
+                : "正在加载 " + connector.name() + " 帖子...");
         executor.execute(() -> {
             try {
-                TopicDetail detail = connector.fetchTopicPage(topicUrl, page);
+                TopicNavigation.PageFetcher fetcher = page -> {
+                    if (destroyed || Thread.currentThread().isInterrupted()) {
+                        throw new IOException("已取消加载。");
+                    }
+                    return connector.fetchTopicPage(topicUrl, page);
+                };
+                TopicDetail detail;
+                if (request.last) {
+                    detail = TopicNavigation.findLastPage(current, fetcher);
+                } else if (request.floor > 0 && request.page == 0) {
+                    detail = TopicNavigation.findFloor(current, request.floor, fetcher);
+                } else {
+                    detail = fetcher.fetch(request.page);
+                }
                 mainHandler.post(() -> {
                     if (destroyed || generation != requestGeneration) { return; }
                     isLoadingPage = false;
+                    retryRequest = null;
                     retryButton.setEnabled(true);
                     retryButton.setText("刷新");
-                    if (append) {
+                    if (request.append) {
                         appendTopic(detail);
                     } else {
                         renderTopic(detail);
+                        if (request.last) {
+                            selectPost(posts.size() - 1, "已跳到最后一楼。");
+                        } else if (request.floor > 0) {
+                            int position = positionForFloor(request.floor);
+                            if (position >= 0) {
+                                selectPost(position, "已跳到第 " + request.floor + " 楼。");
+                            }
+                        }
                     }
                 });
             } catch (Exception error) {
@@ -310,8 +356,6 @@ public final class TopicActivity extends Activity {
                     if (destroyed || generation != requestGeneration) { return; }
                     isLoadingPage = false;
                     pageFailed = true;
-                    failedPage = page;
-                    failedAppend = append;
                     retryButton.setEnabled(true);
                     retryButton.setText("重试");
                     updateLoadMoreButton();
@@ -325,42 +369,154 @@ public final class TopicActivity extends Activity {
         titleView.setText(detail.title);
         posts.clear();
         posts.addAll(detail.posts);
+        hasSiteFloorNumbers = detail.posts.stream().anyMatch(post -> post.floorNumber > 0);
+        firstLoadedPage = detail.pageNumber;
+        latestPage = detail;
         postAdapter.notifyDataSetChanged();
-        loadedPage = detail.pageNumber;
-        hasMorePages = detail.hasMore;
         updateLoadMoreButton();
-        statusView.setText("已加载 " + detail.posts.size() + " 段内容。");
+        statusView.setText("第 " + detail.pageNumber + " 页，已加载 " + detail.posts.size() + " 段内容。");
         postsList.setSelection(0);
     }
 
     private void appendTopic(TopicDetail detail) {
+        if (detail.posts.isEmpty() || detail.pageNumber <= latestPage.pageNumber) {
+            latestPage = new TopicDetail(latestPage.title, latestPage.url, latestPage.posts,
+                    latestPage.pageNumber, false, detail.lastPage, latestPage.pageSize);
+            updateLoadMoreButton();
+            statusView.setText("没有更多可读取的回复。");
+            return;
+        }
+        latestPage = detail;
         posts.addAll(detail.posts);
+        hasSiteFloorNumbers |= detail.posts.stream().anyMatch(post -> post.floorNumber > 0);
         postAdapter.notifyDataSetChanged();
-        loadedPage = detail.pageNumber;
-        hasMorePages = detail.hasMore && !detail.posts.isEmpty();
         updateLoadMoreButton();
-        statusView.setText("已加载到第 " + loadedPage + " 页，新增 " + detail.posts.size() + " 段内容。");
+        statusView.setText("已加载到第 " + detail.pageNumber + " 页，新增 " + detail.posts.size() + " 段内容。");
     }
 
     private void updateLoadMoreButton() {
         if (loadMoreButton == null) {
             return;
         }
-        loadMoreButton.setVisibility(hasMorePages ? View.VISIBLE : View.GONE);
+        boolean hasMore = latestPage != null && latestPage.hasMore;
+        boolean retryAppend = pageFailed && retryRequest.append;
+        jumpButton.setEnabled(!isLoadingPage && !posts.isEmpty());
+        loadMoreButton.setVisibility(hasMore ? View.VISIBLE : View.GONE);
         loadMoreButton.setEnabled(!isLoadingPage);
-        loadMoreButton.setText(isLoadingPage ? "正在加载更多..." : pageFailed ? "重试加载" : "加载更多");
+        loadMoreButton.setText(isLoadingPage ? "正在加载更多..." : retryAppend ? "重试加载" : "加载更多");
     }
 
     private void maybeAutoLoadMore() {
-        if (!destroyed && !pageFailed && hasMorePages && !isLoadingPage) {
+        if (!destroyed && !pageFailed) {
             loadNextPage();
         }
     }
 
     private void loadNextPage() {
-        if (hasMorePages && !isLoadingPage) {
-            loadTopicPage(pageFailed ? failedPage : loadedPage + 1, pageFailed ? failedAppend : true);
+        if (latestPage != null && latestPage.hasMore && !isLoadingPage) {
+            loadTopicPage(pageFailed && retryRequest.append ? retryRequest
+                    : new PageRequest(latestPage.pageNumber + 1, true, 0, false));
         }
+    }
+
+    private void showJumpDialog() {
+        LinearLayout fields = new LinearLayout(this);
+        fields.setPadding(dp(24), dp(8), dp(24), 0);
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER);
+        input.setHint("楼层号（主楼为 1 楼）");
+        fields.addView(input, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("跳转楼层")
+                .setView(fields)
+                .setNeutralButton("主楼", (d, which) -> jumpToFloor(1))
+                .setNegativeButton("最后一楼", (d, which) -> jumpToLast())
+                .setPositiveButton("跳转", null)
+                .create();
+        dialog.setOnShowListener(d -> {
+            Runnable submit = () -> {
+                try {
+                    int floor = Integer.parseInt(input.getText().toString().trim());
+                    if (floor <= 0) { throw new NumberFormatException(); }
+                    dialog.dismiss();
+                    jumpToFloor(floor);
+                } catch (NumberFormatException ignored) {
+                    input.setError("请输入有效的楼层号");
+                }
+            };
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> submit.run());
+            input.setOnEditorActionListener((view, action, event) -> {
+                if (action == android.view.inputmethod.EditorInfo.IME_ACTION_GO) {
+                    submit.run();
+                    return true;
+                }
+                return false;
+            });
+        });
+        input.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_GO);
+        dialog.show();
+    }
+
+    private int floorAt(int position) {
+        int original = posts.get(position).floorNumber;
+        if (original > 0 || hasSiteFloorNumbers || firstLoadedPage != 1) { return original; }
+        return position + 1;
+    }
+
+    private int positionForFloor(int floor) {
+        for (int position = 0; position < posts.size(); position++) {
+            if (floorAt(position) == floor) { return position; }
+        }
+        return -1;
+    }
+
+    private void jumpToFloor(int floor) {
+        int position = positionForFloor(floor);
+        if (position >= 0) {
+            selectPost(position, "已跳到第 " + floor + " 楼。");
+        } else if (floor == 1) {
+            loadTopicPage(new PageRequest(1, false, 1, false));
+        } else {
+            loadTopicPage(new PageRequest(0, false, floor, false));
+        }
+    }
+
+    private void jumpToLast() {
+        if (latestPage.hasMore) {
+            loadTopicPage(new PageRequest(0, false, 0, true));
+        } else {
+            selectPost(posts.size() - 1, latestPage.lastPage > 0
+                    ? "已跳到最后一楼。" : "已跳到当前已加载的最后一楼。");
+        }
+    }
+
+    private void selectPost(int position, String message) {
+        if (position < 0) { return; }
+        pageFailed = false;
+        retryRequest = null;
+        retryButton.setText("刷新");
+        updateLoadMoreButton();
+        restoringPosition = true;
+        userScrolling = false;
+        statusView.setText(message);
+        int generation = requestGeneration;
+        // Apply the selection after ListView has consumed the adapter's new data and
+        // restored its own scroll state. That layout can otherwise discard the jump.
+        postsList.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override public boolean onPreDraw() {
+                postsList.getViewTreeObserver().removeOnPreDrawListener(this);
+                if (destroyed || generation != requestGeneration) {
+                    restoringPosition = false;
+                    return true;
+                }
+                postsList.setSelectionFromTop(position, 0);
+                postsList.postOnAnimation(() -> restoringPosition = false);
+                return false;
+            }
+        });
+        postsList.invalidate();
     }
 
     private View createPostView(Post post, int floorNumber, View recycled) {
@@ -434,13 +590,19 @@ public final class TopicActivity extends Activity {
             textColumn.addView(replyView, replyParams);
         }
 
-        TextView contentView = new TextView(this);
-        contentView.setText(spannablePostContent(post, contentView));
-        contentView.setTextColor(Color.rgb(32, 33, 36));
-        contentView.setTextSize(16);
-        contentView.setLineSpacing(0, 1.05f);
-        contentView.setTextIsSelectable(true);
-        textColumn.addView(contentView);
+        if (!post.content.isEmpty()) {
+            TextView contentView = new TextView(this);
+            contentView.setText(spannablePostContent(post, contentView));
+            contentView.setTextColor(Color.rgb(32, 33, 36));
+            contentView.setTextSize(16);
+            contentView.setLineSpacing(0, 1.05f);
+            contentView.setTextIsSelectable(true);
+            textColumn.addView(contentView);
+        }
+
+        for (Poll poll : post.polls) {
+            addPollView(textColumn, poll);
+        }
 
         for (String imageUrl : post.imageUrls) {
             if (!isHttpUrl(imageUrl)) {
@@ -476,6 +638,52 @@ public final class TopicActivity extends Activity {
 
     private String floorLabel(int floorNumber) {
         return floorNumber + "楼";
+    }
+
+    private void addPollView(LinearLayout column, Poll poll) {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(12), dp(10), dp(12), dp(10));
+        panel.setBackgroundColor(Color.rgb(238, 237, 232));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        params.topMargin = dp(8);
+        column.addView(panel, params);
+
+        TextView question = new TextView(this);
+        question.setText(poll.question.isEmpty() || poll.question.contentEquals(titleView.getText())
+                ? "投票" : poll.question);
+        question.setTextColor(Color.rgb(32, 33, 36));
+        question.setTextSize(16);
+        question.setTypeface(question.getTypeface(), android.graphics.Typeface.BOLD);
+        question.setTextIsSelectable(true);
+        panel.addView(question);
+
+        if (!poll.status.isEmpty()) {
+            TextView status = new TextView(this);
+            status.setText(poll.status);
+            status.setTextColor(Color.rgb(95, 99, 104));
+            status.setTextSize(13);
+            status.setPadding(0, dp(4), 0, 0);
+            panel.addView(status);
+        }
+
+        for (Poll.Option option : poll.options) {
+            TextView label = new TextView(this);
+            label.setText(option.result.isEmpty() ? option.text : option.text + "\n" + option.result);
+            label.setTextSize(15);
+            label.setTextColor(Color.rgb(32, 33, 36));
+            label.setPadding(0, dp(8), 0, 0);
+            label.setTextIsSelectable(true);
+            panel.addView(label);
+        }
+
+        Button original = makeButton("在原站查看投票");
+        original.setTextColor(Color.rgb(37, 108, 90));
+        original.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        original.setOnClickListener(v -> OriginalWebActivity.open(this, topicUrl, connector.name()));
+        panel.addView(original, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)));
     }
 
     private FrameLayout makeAvatarFrame(String avatarUrl) {

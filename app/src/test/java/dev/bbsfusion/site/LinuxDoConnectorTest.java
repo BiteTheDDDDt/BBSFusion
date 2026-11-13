@@ -2,10 +2,12 @@ package dev.bbsfusion.site;
 
 import dev.bbsfusion.core.BoardDefinition;
 import dev.bbsfusion.core.Post;
+import dev.bbsfusion.core.Poll;
 import dev.bbsfusion.core.TopicDetail;
 import dev.bbsfusion.core.TopicSummary;
 
 import org.json.JSONObject;
+import org.json.JSONArray;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.parser.Parser;
@@ -14,9 +16,164 @@ import org.junit.Test;
 import java.util.List;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 public final class LinuxDoConnectorTest {
+    @Test
+    public void countsPagesFromStreamIdsWithoutTreatingPostNumbersAsOffsets() throws Exception {
+        org.json.JSONArray ids = new org.json.JSONArray();
+        for (int i = 0; i < 45; i++) { ids.put(1000 + i); }
+        JSONObject root = new JSONObject().put("title", "topic").put("post_stream", new JSONObject()
+                .put("stream", ids).put("posts", new org.json.JSONArray()
+                        .put(new JSONObject().put("post_number", 51).put("cooked", "<p>first</p>"))
+                        .put(new JSONObject().put("post_number", 54).put("cooked", "<p>second</p>"))));
+        TopicDetail detail = LinuxDoConnector.parseTopicFromJson(root, "https://linux.do/t/201", 3);
+        assertEquals(3, detail.lastPage);
+        assertEquals(0, detail.pageSize);
+        assertEquals(51, detail.posts.get(0).floorNumber);
+        assertEquals(54, detail.posts.get(1).floorNumber);
+        org.junit.Assert.assertFalse(detail.hasMore);
+        assertTrue(LinuxDoConnector.parseTopicFromJson(root, "https://linux.do/t/201", 2).hasMore);
+    }
+
+    @Test
+    public void fallbackDocumentsDoNotClaimToContainTheLastSourcePage() {
+        TopicDetail html = LinuxDoConnector.parseTopicFromHtml(
+                Jsoup.parse("<article><div class='cooked'>partial content</div></article>"),
+                "https://linux.do/t/201");
+        TopicDetail rss = LinuxDoConnector.parseTopicFromRss(Jsoup.parse(
+                "<rss><channel><title>topic</title><item><guid>1</guid><description>partial content</description>"
+                        + "</item></channel></rss>", "https://linux.do/", Parser.xmlParser()),
+                "https://linux.do/t/201");
+        assertEquals(0, html.lastPage);
+        assertEquals(0, rss.lastPage);
+        assertEquals(0, html.posts.get(0).floorNumber);
+        assertEquals(0, rss.posts.get(0).floorNumber);
+    }
+
+    @Test
+    public void jsonPollOnlyPostsRetainProvidedResultsIncludingGenuineZeroVotes() throws Exception {
+        JSONObject poll = new JSONObject().put("name", "poll").put("title", "选择 <b>系统</b>")
+                .put("type", "regular").put("status", "open").put("results", "always")
+                .put("options", new JSONArray()
+                        .put(new JSONObject().put("html", "<b>Linux</b>").put("votes", 2))
+                        .put(new JSONObject().put("html", "Windows").put("votes", 0)));
+        Post post = parsePollPost(new JSONObject().put("post_number", 42).put("cooked", "")
+                .put("polls", new JSONArray().put(poll)));
+
+        assertEquals("", post.content);
+        assertEquals(1, post.polls.size());
+        Poll parsed = post.polls.get(0);
+        assertEquals("选择 系统", parsed.question);
+        assertEquals("Linux", parsed.options.get(0).text);
+        assertEquals("2 票", parsed.options.get(0).result);
+        assertEquals("0 票", parsed.options.get(1).result);
+        assertTrue(parsed.status.contains("单选"));
+        assertTrue(parsed.status.contains("投票进行中"));
+    }
+
+    @Test
+    public void missingVotesRemainHiddenAndCookedPollPlaceholderCountsAreRemoved() throws Exception {
+        String cooked = "<p>前文</p>" + cookedPoll("weekend", "周末安排", "旅行", "阅读") + "<p>后文</p>";
+        JSONObject poll = new JSONObject().put("name", "weekend")
+                .put("type", "multiple").put("status", "open").put("results", "on_vote")
+                .put("voters", 123).put("options", new JSONArray()
+                        .put(new JSONObject().put("html", "旅行"))
+                        .put(new JSONObject().put("html", "阅读")));
+        Post post = parsePollPost(new JSONObject().put("cooked", cooked)
+                .put("polls", new JSONArray().put(poll)));
+
+        assertEquals(1, post.polls.size());
+        assertEquals("周末安排", post.polls.get(0).question);
+        assertEquals("", post.polls.get(0).options.get(0).result);
+        assertEquals("", post.polls.get(0).options.get(1).result);
+        assertTrue(post.polls.get(0).status.contains("结果请在原站查看"));
+        assertTrue(post.content.contains("前文"));
+        assertTrue(post.content.contains("后文"));
+        assertFalse(post.content.contains("旅行"));
+        assertFalse(post.content.contains("voters"));
+        assertFalse(post.content.contains("123"));
+    }
+
+    @Test
+    public void pollsKeepServerOptionOrderAndIgnoreInvalidVoteValues() throws Exception {
+        JSONObject poll = new JSONObject().put("title", "公开选项").put("status", "closed")
+                .put("options", new JSONArray()
+                        .put(new JSONObject().put("html", "<img alt='图案甲' src='/one.png'>").put("votes", -1))
+                        .put(new JSONObject().put("html", "第二项").put("votes", "unknown"))
+                        .put(new JSONObject().put("html", "第三项").put("votes", JSONObject.NULL)));
+        Post post = parsePollPost(new JSONObject().put("polls", new JSONArray().put(poll)));
+
+        assertEquals(3, post.polls.get(0).options.size());
+        assertEquals("图案甲", post.polls.get(0).options.get(0).text);
+        assertEquals("第二项", post.polls.get(0).options.get(1).text);
+        for (Poll.Option option : post.polls.get(0).options) {
+            assertEquals("", option.result);
+        }
+        assertTrue(post.polls.get(0).status.contains("投票已结束"));
+    }
+
+    @Test
+    public void htmlFallbackKeepsPollOnlyPostAndNeverUsesCookedPlaceholderCounts() {
+        String poll = cookedPoll("poll", "午餐", "米饭", "面条");
+        TopicDetail detail = LinuxDoConnector.parseTopicFromHtml(
+                Jsoup.parse("<h1>主题</h1><article><div class='cooked'>" + poll + "</div></article>"),
+                "https://linux.do/t/topic/1");
+
+        assertEquals(1, detail.posts.size());
+        assertEquals("", detail.posts.get(0).content);
+        assertEquals("午餐", detail.posts.get(0).polls.get(0).question);
+        assertEquals(2, detail.posts.get(0).polls.get(0).options.size());
+        assertEquals("", detail.posts.get(0).polls.get(0).options.get(0).result);
+    }
+
+    @Test
+    public void quotedPollsDoNotBecomeTheCurrentPostsPollsAndOrdinaryListsRemainText() {
+        LinuxDoConnector.ParsedContent parsed = LinuxDoConnector.parsedCooked(
+                "<aside class='quote'>" + cookedPoll("quote", "引用投票", "甲", "乙") + "</aside>"
+                        + "<ul><li>普通列表</li></ul>" + cookedPoll("own", "当前投票", "丙", "丁"));
+
+        assertEquals(1, parsed.polls.size());
+        assertEquals("当前投票", parsed.polls.get(0).question);
+        assertTrue(parsed.text.contains("普通列表"));
+        assertFalse(parsed.text.contains("当前投票"));
+        assertTrue(parsed.replyContext.contains("引用投票"));
+    }
+
+    @Test
+    public void rssFallbackDeduplicatesTheOpeningPollButKeepsDifferentPolls() {
+        String first = cookedPoll("first", "第一个问题", "甲", "乙");
+        String second = cookedPoll("second", "第二个问题", "丙", "丁");
+        String xml = "<rss><channel><title>主题</title><description><![CDATA[" + first + "]]></description>"
+                + "<item><guid>one</guid><description><![CDATA[" + first + "]]></description></item>"
+                + "<item><guid>two</guid><description><![CDATA[" + second + "]]></description></item>"
+                + "</channel></rss>";
+        TopicDetail detail = LinuxDoConnector.parseTopicFromRss(
+                Jsoup.parse(xml, "https://linux.do/", Parser.xmlParser()), "https://linux.do/t/topic/1");
+
+        assertEquals(2, detail.posts.size());
+        assertEquals("第一个问题", detail.posts.get(0).polls.get(0).question);
+        assertEquals("第二个问题", detail.posts.get(1).polls.get(0).question);
+    }
+
+    private static Post parsePollPost(JSONObject post) throws Exception {
+        JSONObject root = new JSONObject().put("title", "主题").put("post_stream",
+                new JSONObject().put("posts", new JSONArray().put(post)));
+        TopicDetail detail = LinuxDoConnector.parseTopicFromJson(root, "https://linux.do/t/topic/1");
+        assertEquals(1, detail.posts.size());
+        return detail.posts.get(0);
+    }
+
+    // Matches Discourse's official poll markdown output. poll-info contains rendering placeholders.
+    private static String cookedPoll(String name, String title, String first, String second) {
+        return "<div class='poll' data-poll-name='" + name + "' data-poll-type='regular' data-poll-status='open'>"
+                + "<div><div class='poll-container'><div class='poll-title'>" + title + "</div><ul>"
+                + "<li data-poll-option-id='a'>" + first + "</li>"
+                + "<li data-poll-option-id='b'>" + second + "</li></ul></div>"
+                + "<div class='poll-info'><p><span class='info-number'>0</span> voters</p></div></div></div>";
+    }
+
     @Test
     public void responseParsersRetainAllIdentifiedPostsBeyondEighty() throws Exception {
         StringBuilder html = new StringBuilder("<h1>主题</h1>");

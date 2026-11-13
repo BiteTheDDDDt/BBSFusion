@@ -1,6 +1,7 @@
 package dev.bbsfusion;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.graphics.Color;
 import android.os.Bundle;
@@ -23,6 +24,7 @@ import dev.bbsfusion.core.SubscriptionGroup;
 import dev.bbsfusion.core.SubscriptionStore;
 import dev.bbsfusion.core.TimelineFeedAggregator;
 import dev.bbsfusion.core.TopicSummary;
+import dev.bbsfusion.ui.AppUpdateDialog;
 import dev.bbsfusion.ui.TopicAdapter;
 import dev.bbsfusion.ui.WindowInsetsHelper;
 
@@ -65,6 +67,7 @@ public final class MainActivity extends Activity {
     private Button loginButton;
     private Button refreshButton;
     private Button moreButton;
+    private AlertDialog updateDialog;
     private ListView topicListView;
     private float listTouchDownX;
     private float listTouchDownY;
@@ -108,6 +111,9 @@ public final class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         destroyed = true;
+        if (updateDialog != null) {
+            updateDialog.dismiss();
+        }
         mainHandler.removeCallbacksAndMessages(null);
         executor.shutdownNow();
         super.onDestroy();
@@ -194,10 +200,14 @@ public final class MainActivity extends Activity {
         loginButton.setOnClickListener(v -> startActivity(new Intent(this, SessionActivity.class)));
         refreshButton = makeButton("刷新");
         refreshButton.setOnClickListener(v -> refreshTopics());
+        Button updateButton = makeButton(getString(R.string.update_entry));
+        paintButton(updateButton, false);
+        updateButton.setOnClickListener(v -> updateDialog = AppUpdateDialog.show(this));
 
         actions.addView(configButton, new LinearLayout.LayoutParams(0, dp(44), 1));
         actions.addView(loginButton, new LinearLayout.LayoutParams(0, dp(44), 1));
         actions.addView(refreshButton, new LinearLayout.LayoutParams(0, dp(44), 1));
+        actions.addView(updateButton, new LinearLayout.LayoutParams(0, dp(44), 1));
         root.addView(actions);
 
         adapter = new TopicAdapter(this, topics);

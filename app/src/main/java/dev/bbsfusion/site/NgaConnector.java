@@ -285,7 +285,7 @@ public final class NgaConnector implements ForumConnector {
             String author = authorFromPostJson(item, json, posts.size());
             String avatarUrl = avatarFromPostJson(item, json);
             String meta = postMetaFromApiPost(item);
-            int floorNumber = posts.size() + 1;
+            int floorNumber = apiFloorNumber(item);
             posts.add(new Post(
                     author,
                     avatarUrl,
@@ -293,10 +293,11 @@ public final class NgaConnector implements ForumConnector {
                     parsedContent.replyContext,
                     parsedContent.text,
                     parsedContent.imageUrls,
-                    parsedContent.inlineImages
+                    parsedContent.inlineImages,
+                    floorNumber
             ));
             String postId = postIdFromPostJson(item);
-            if (!postId.isEmpty() && page <= 1) {
+            if (!postId.isEmpty() && floorNumber > 0) {
                 floorByPid.put(postId, floorNumber);
             }
         }
@@ -316,13 +317,47 @@ public final class NgaConnector implements ForumConnector {
         }
         int pageNumber = Math.max(1, page);
         int reportedPage = json.optInt("currentPage", pageNumber);
-        // A topic may shrink while it is being read. Do not append an earlier
-        // page again when the API clamps an out-of-range request to its last page.
-        if (reportedPage > 0 && reportedPage < pageNumber) {
-            return new TopicDetail(title, url, new ArrayList<>(), pageNumber, false);
+        int actualPage = reportedPage > 0 ? reportedPage : pageNumber;
+        // Preserve server clamping for jumps; callers must not append an already loaded page.
+        return new TopicDetail(title, url, posts, actualPage,
+                hasMoreApiPages(json, actualPage, result.length()), apiLastPage(json),
+                apiPageSize(json, result, actualPage));
+    }
+
+    private static int apiFloorNumber(JSONObject post) {
+        // The official post/list response uses zero-based lou, including lou=0 for the opener.
+        long floor = post.optLong("lou", -1L);
+        return floor >= 0L && floor < Integer.MAX_VALUE ? (int) floor + 1 : 0;
+    }
+
+    private static int apiLastPage(JSONObject root) {
+        long pages = root.optLong("totalPage", -1L);
+        if (pages > 0L && pages <= Integer.MAX_VALUE) {
+            return (int) pages;
         }
-        return new TopicDetail(title, url, posts, pageNumber,
-                hasMoreApiPages(json, Math.max(pageNumber, reportedPage), result.length()));
+        long rows = root.optLong("vrows", -1L);
+        long perPage = root.optLong("perPage", 0L);
+        if (rows > 0L && perPage > 0L) {
+            pages = (rows - 1L) / perPage + 1L;
+            return pages <= Integer.MAX_VALUE ? (int) pages : 0;
+        }
+        return 0;
+    }
+
+    private static int apiPageSize(JSONObject root, JSONArray posts, int page) {
+        long size = root.optLong("perPage", 0L);
+        if (size <= 0L || size > Integer.MAX_VALUE || posts.length() == 0) {
+            return 0;
+        }
+        long first = (page - 1L) * size + 1L;
+        for (int i = 0; i < posts.length(); i++) {
+            JSONObject post = posts.optJSONObject(i);
+            int floor = post == null ? 0 : apiFloorNumber(post);
+            if (floor < first || floor >= first + size) {
+                return 0;
+            }
+        }
+        return (int) size;
     }
 
     private static boolean hasMoreApiPages(JSONObject root, int page, int receivedCount) {

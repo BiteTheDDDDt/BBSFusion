@@ -4,6 +4,7 @@ import dev.bbsfusion.core.BoardCatalog;
 import dev.bbsfusion.core.BoardDefinition;
 import dev.bbsfusion.core.ForumConnector;
 import dev.bbsfusion.core.Post;
+import dev.bbsfusion.core.Poll;
 import dev.bbsfusion.core.TopicDetail;
 import dev.bbsfusion.core.TopicSummary;
 
@@ -203,31 +204,31 @@ public final class LinuxDoConnector implements ForumConnector {
                 || initialStream.optJSONArray("posts") == null) {
             throw new IOException("Linux.do 接口未返回有效帖子数据。");
         }
-        if (pageNumber <= 1) {
+        JSONArray streamIds = streamIds(root);
+        int lastPage = topicPageCount(root);
+        int actualPage = lastPage > 0 ? Math.min(Math.max(1, pageNumber), lastPage) : 1;
+        if (actualPage <= 1) {
             return parseTopicFromJson(root, topicUrl, 1);
         }
 
-        JSONArray streamIds = streamIds(root);
-        int start = (pageNumber - 1) * POSTS_PAGE_SIZE;
-        if (streamIds.length() <= start) {
-            return new TopicDetail(topicTitle(root), topicUrl, new ArrayList<>(), pageNumber, false);
-        }
+        int start = (actualPage - 1) * POSTS_PAGE_SIZE;
 
         List<String> postIds = new ArrayList<>();
-        for (int i = start; i < streamIds.length() && postIds.size() < POSTS_PAGE_SIZE; i++) {
+        int end = (int) Math.min(streamIds.length(), start + (long) POSTS_PAGE_SIZE);
+        for (int i = start; i < end; i++) {
             String postId = String.valueOf(streamIds.optLong(i, 0L));
             if (!"0".equals(postId)) {
                 postIds.add(postId);
             }
         }
         if (postIds.isEmpty()) {
-            return new TopicDetail(topicTitle(root), topicUrl, new ArrayList<>(), pageNumber, false);
+            throw new IOException("Linux.do 接口未返回有效楼层编号。");
         }
 
         String topicId = firstNonEmpty(topicIdFromUrl(topicUrl), topicIdFromUrl(jsonUrl));
         String postsUrl = postsJsonUrlForTopic(topicId, postIds);
         if (postsUrl.isEmpty()) {
-            return new TopicDetail(topicTitle(root), topicUrl, new ArrayList<>(), pageNumber, false);
+            throw new IOException("Linux.do 帖子链接缺少 topic id。");
         }
         JSONObject postsRoot = NetworkClient.getJsonObject(postsUrl, topicUrl);
         JSONObject postsStream = postsRoot.optJSONObject("post_stream");
@@ -237,9 +238,10 @@ public final class LinuxDoConnector implements ForumConnector {
         return parseTopicFromJson(
                 postsRoot,
                 topicUrl,
-                pageNumber,
-                start + postIds.size() < streamIds.length(),
-                topicTitle(root)
+                actualPage,
+                actualPage < lastPage,
+                topicTitle(root),
+                lastPage
         );
     }
 
@@ -397,8 +399,9 @@ public final class LinuxDoConnector implements ForumConnector {
                 root,
                 url,
                 pageNumber,
-                streamIds(root).length() > pageNumber * POSTS_PAGE_SIZE,
-                topicTitle(root)
+                streamIds(root).length() > pageNumber * (long) POSTS_PAGE_SIZE,
+                topicTitle(root),
+                topicPageCount(root)
         );
     }
 
@@ -409,6 +412,11 @@ public final class LinuxDoConnector implements ForumConnector {
             boolean hasMore,
             String titleFallback
     ) {
+        return parseTopicFromJson(root, url, pageNumber, hasMore, titleFallback, topicPageCount(root));
+    }
+
+    private static TopicDetail parseTopicFromJson(JSONObject root, String url, int pageNumber,
+            boolean hasMore, String titleFallback, int lastPage) {
         String title = firstNonEmpty(topicTitle(root), titleFallback);
         List<Post> posts = new ArrayList<>();
         JSONObject stream = root.optJSONObject("post_stream");
@@ -423,7 +431,9 @@ public final class LinuxDoConnector implements ForumConnector {
                 posts.add(post);
             }
         }
-        return new TopicDetail(title.isEmpty() ? "帖子详情" : title, url, posts, pageNumber, hasMore);
+        // Stream positions are page offsets; post_number may have gaps and is not an offset.
+        return new TopicDetail(title.isEmpty() ? "帖子详情" : title, url, posts, pageNumber,
+                hasMore, lastPage, 0);
     }
 
     static TopicDetail parseTopicFromHtml(Document document, String url) {
@@ -440,7 +450,8 @@ public final class LinuxDoConnector implements ForumConnector {
             }
             ParsedContent content = parsedCooked(contentElement.html());
             if (content.text.isEmpty() && content.imageUrls.isEmpty()
-                    && content.inlineImages.isEmpty() && content.replyContext.isEmpty()) {
+                    && content.inlineImages.isEmpty() && content.replyContext.isEmpty()
+                    && content.polls.isEmpty()) {
                 continue;
             }
             String author = clean(firstText(container, ".creator a", ".names a", "a[href^=/u/]"));
@@ -459,7 +470,9 @@ public final class LinuxDoConnector implements ForumConnector {
                     content.replyContext,
                     content.text,
                     content.imageUrls,
-                    content.inlineImages
+                    content.inlineImages,
+                    0,
+                    content.polls
             ));
         }
         return new TopicDetail(title.isEmpty() ? "帖子详情" : title, url, posts);
@@ -481,7 +494,9 @@ public final class LinuxDoConnector implements ForumConnector {
                 topicDescription.replyContext,
                 topicDescription.text,
                 topicDescription.imageUrls,
-                topicDescription.inlineImages
+                topicDescription.inlineImages,
+                0,
+                topicDescription.polls
         );
 
         for (Element item : sortedRssItems(document)) {
@@ -490,7 +505,7 @@ public final class LinuxDoConnector implements ForumConnector {
                 continue;
             }
             ParsedContent content = parsedRssDescription(firstText(item, "description"), url);
-            if (content.text.isEmpty() && content.imageUrls.isEmpty()) {
+            if (content.text.isEmpty() && content.imageUrls.isEmpty() && content.polls.isEmpty()) {
                 continue;
             }
             String author = firstNonEmpty(
@@ -505,7 +520,9 @@ public final class LinuxDoConnector implements ForumConnector {
                     content.replyContext,
                     content.text,
                     content.imageUrls,
-                    content.inlineImages
+                    content.inlineImages,
+                    0,
+                    content.polls
             ));
         }
         // The channel description may repeat the opening post. Prefer its real
@@ -513,13 +530,15 @@ public final class LinuxDoConnector implements ForumConnector {
         boolean descriptionAlreadyPresent = false;
         for (Post post : posts) {
             if (clean(post.content).equals(clean(descriptionPost.content))
-                    && post.imageUrls.equals(descriptionPost.imageUrls)) {
+                    && post.imageUrls.equals(descriptionPost.imageUrls)
+                    && samePolls(post.polls, descriptionPost.polls)) {
                 descriptionAlreadyPresent = true;
                 break;
             }
         }
         if (!descriptionAlreadyPresent && (!descriptionPost.content.isEmpty()
-                || !descriptionPost.imageUrls.isEmpty() || !descriptionPost.replyContext.isEmpty())) {
+                || !descriptionPost.imageUrls.isEmpty() || !descriptionPost.replyContext.isEmpty()
+                || !descriptionPost.polls.isEmpty())) {
             posts.add(0, descriptionPost);
         }
         return new TopicDetail(title.isEmpty() ? "帖子详情" : title, url, posts);
@@ -629,6 +648,11 @@ public final class LinuxDoConnector implements ForumConnector {
         return ids == null ? new JSONArray() : ids;
     }
 
+    private static int topicPageCount(JSONObject root) {
+        int count = streamIds(root).length();
+        return count == 0 ? 0 : (count - 1) / POSTS_PAGE_SIZE + 1;
+    }
+
     private static List<JsonPost> sortedJsonPosts(JSONArray array) {
         List<JsonPost> posts = new ArrayList<>();
         for (int i = 0; i < array.length(); i++) {
@@ -649,8 +673,13 @@ public final class LinuxDoConnector implements ForumConnector {
     }
 
     private static Post postFromJson(JSONObject item, int fallbackNumber) {
-        ParsedContent content = parsedCooked(item.optString("cooked", ""));
-        if (content.text.isEmpty() && content.imageUrls.isEmpty()) {
+        String cooked = item.optString("cooked", "");
+        ParsedContent content = parsedCooked(cooked);
+        List<Poll> polls = parsedPollsFromJson(item.optJSONArray("polls"), cooked);
+        if (polls.isEmpty()) {
+            polls = content.polls;
+        }
+        if (content.text.isEmpty() && content.imageUrls.isEmpty() && polls.isEmpty()) {
             return null;
         }
         String replyContext = content.replyContext;
@@ -671,7 +700,9 @@ public final class LinuxDoConnector implements ForumConnector {
                 replyContext,
                 content.text,
                 content.imageUrls,
-                content.inlineImages
+                content.inlineImages,
+                Math.max(0, item.optInt("post_number", 0)),
+                polls
         );
     }
 
@@ -834,6 +865,7 @@ public final class LinuxDoConnector implements ForumConnector {
         Document document = Jsoup.parse(html == null ? "" : html, BASE_URL + "/");
         String replyContext = extractReplyContext(document);
         document.select("aside.quote, blockquote").remove();
+        List<Poll> polls = parsedPollsFromCooked(document);
         List<String> imageUrls = new ArrayList<>();
         List<Post.InlineImage> inlineImages = new ArrayList<>();
         for (Element image : document.select("img[src]")) {
@@ -853,7 +885,123 @@ public final class LinuxDoConnector implements ForumConnector {
             image.remove();
         }
         String text = HtmlText.textWithLineBreaks(document.body());
-        return new ParsedContent(text, replyContext, imageUrls, inlineImages);
+        return new ParsedContent(text, replyContext, imageUrls, inlineImages, polls);
+    }
+
+    private static List<Poll> parsedPollsFromJson(JSONArray array, String cooked) {
+        List<Poll> polls = new ArrayList<>();
+        if (array == null) {
+            return polls;
+        }
+        Document document = Jsoup.parse(cooked, BASE_URL + "/");
+        document.select("aside.quote, blockquote").remove();
+        Map<String, String> questions = new HashMap<>();
+        for (Element element : document.select("div.poll[data-poll-name]")) {
+            questions.put(element.attr("data-poll-name"), firstText(element, ".poll-title"));
+        }
+        for (int i = 0; i < array.length(); i++) {
+            JSONObject poll = array.optJSONObject(i);
+            JSONArray optionsJson = poll == null ? null : poll.optJSONArray("options");
+            if (optionsJson == null) {
+                continue;
+            }
+            List<Poll.Option> options = new ArrayList<>();
+            boolean hasResults = false;
+            for (int optionIndex = 0; optionIndex < optionsJson.length(); optionIndex++) {
+                JSONObject option = optionsJson.optJSONObject(optionIndex);
+                if (option == null) {
+                    continue;
+                }
+                String text = pollText(option.optString("html", ""));
+                if (text.isEmpty()) {
+                    continue;
+                }
+                // Discourse's PollOptionSerializer omits votes when this reader cannot see results.
+                // The cooked HTML has placeholder counts, so only this optional JSON field is used.
+                String votes = option.has("votes") && !option.isNull("votes")
+                        ? option.optString("votes", "").trim() : "";
+                String result = votes.matches("[0-9]+") ? votes + " 票" : "";
+                hasResults |= !result.isEmpty();
+                options.add(new Poll.Option(text, result));
+            }
+            if (!options.isEmpty()) {
+                String question = firstNonEmpty(pollText(poll.optString("title", "")),
+                        questions.get(poll.optString("name", "")), "投票");
+                polls.add(new Poll(question, pollStatus(poll.optString("type", ""),
+                        poll.optString("status", ""), hasResults), options));
+            }
+        }
+        return polls;
+    }
+
+    private static List<Poll> parsedPollsFromCooked(Document document) {
+        List<Poll> polls = new ArrayList<>();
+        for (Element element : document.select("div.poll")) {
+            List<Poll.Option> options = new ArrayList<>();
+            for (Element option : element.select(".poll-container li[data-poll-option-id]")) {
+                String text = pollText(option.html());
+                if (!text.isEmpty()) {
+                    options.add(new Poll.Option(text, ""));
+                }
+            }
+            if (!options.isEmpty()) {
+                polls.add(new Poll(firstNonEmpty(firstText(element, ".poll-title"), "投票"),
+                        pollStatus(element.attr("data-poll-type"), element.attr("data-poll-status"), false),
+                        options));
+                // Keep unrecognised content intact; remove only a structurally identified poll.
+                element.remove();
+            }
+        }
+        return polls;
+    }
+
+    private static String pollText(String html) {
+        Document document = Jsoup.parse(html, BASE_URL + "/");
+        document.select("script, style").remove();
+        for (Element image : document.select("img")) {
+            image.replaceWith(new TextNode(firstNonEmpty(image.attr("alt"), "[图片选项]")));
+        }
+        return HtmlText.textWithLineBreaks(document.body()).trim();
+    }
+
+    private static String pollStatus(String type, String status, boolean hasResults) {
+        String mode = "multiple".equals(type) ? "多选" : "number".equals(type) ? "数值投票"
+                : "ranked_choice".equals(type) ? "排序投票" : "regular".equals(type) ? "单选" : "";
+        String state = "closed".equals(status) ? "投票已结束"
+                : "open".equals(status) ? "投票进行中" : "";
+        String result = hasResults ? "" : "结果请在原站查看";
+        return String.join(" · ", nonEmptyParts(mode, state, result));
+    }
+
+    private static List<String> nonEmptyParts(String... values) {
+        List<String> parts = new ArrayList<>();
+        for (String value : values) {
+            if (!value.isEmpty()) {
+                parts.add(value);
+            }
+        }
+        return parts;
+    }
+
+    private static boolean samePolls(List<Poll> left, List<Poll> right) {
+        if (left.size() != right.size()) {
+            return false;
+        }
+        for (int i = 0; i < left.size(); i++) {
+            Poll a = left.get(i);
+            Poll b = right.get(i);
+            if (!a.question.equals(b.question) || !a.status.equals(b.status)
+                    || a.options.size() != b.options.size()) {
+                return false;
+            }
+            for (int j = 0; j < a.options.size(); j++) {
+                if (!a.options.get(j).text.equals(b.options.get(j).text)
+                        || !a.options.get(j).result.equals(b.options.get(j).result)) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private static ParsedContent parsedRssDescription(String html, String topicUrl) {
@@ -877,7 +1025,7 @@ public final class LinuxDoConnector implements ForumConnector {
             Post post
     ) {
         String contentKey = clean(post.content);
-        if (contentKey.isEmpty() && post.imageUrls.isEmpty()) {
+        if (contentKey.isEmpty() && post.imageUrls.isEmpty() && post.polls.isEmpty()) {
             return;
         }
         posts.add(post);
@@ -1047,17 +1195,20 @@ public final class LinuxDoConnector implements ForumConnector {
         final String replyContext;
         final List<String> imageUrls;
         final List<Post.InlineImage> inlineImages;
+        final List<Poll> polls;
 
         ParsedContent(
                 String text,
                 String replyContext,
                 List<String> imageUrls,
-                List<Post.InlineImage> inlineImages
+                List<Post.InlineImage> inlineImages,
+                List<Poll> polls
         ) {
             this.text = text;
             this.replyContext = replyContext;
             this.imageUrls = imageUrls;
             this.inlineImages = inlineImages;
+            this.polls = polls;
         }
     }
 
